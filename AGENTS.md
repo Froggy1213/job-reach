@@ -39,6 +39,35 @@ instructions, and a failure only a human could interpret is a bug. The README's
 6. **The skill's `description` is its trigger.** Hermes renders the skills
    index from it and truncates at 57 characters. Keep it ≤ 60, end it with a
    period, and never pad it with marketing words.
+7. **Every OS difference lives in `jobreach/platforms.py`.** No `os.name`,
+   `sys.platform` or `os.sep` check anywhere else — the helpers there take an
+   explicit platform argument so both layouts (POSIX `bin/python` and Windows
+   `Scripts\python.exe`) are tested from one machine. The plugin ships for
+   macOS, Linux *and* Windows; a POSIX-assuming line is a bug, not a nuance.
+
+## Platform support
+
+The plugin is installed by other people's Hermes agents, on whatever OS they
+run, so portability is a product feature rather than a nicety. What that costs:
+
+- **`jobreach/platforms.py` is the only place that knows the OS.** It answers:
+  where a virtualenv keeps its interpreter, where `uv` lives, how to kill a
+  process *tree*, and how to detach a child from console signals.
+- **The cron monitor is Python, not bash.** Hermes runs a cron script by
+  extension: `.sh`/`.bash` go through bash, anything else through Hermes' own
+  interpreter (the shebang is ignored). A stock Windows install has no bash, so
+  a bash monitor would simply never run there. The generated script spawns the
+  *engine* interpreter, which is resolved at install time.
+- **Never `export HERMES_HOME=<temp dir>` in a shell you keep using.** The CLI
+  resolves plugins under `$HERMES_HOME/plugins`, so an exported override makes
+  `hermes <plugin-name> …` answer *"'job-reach' is not a hermes command"* and
+  `hermes plugins list` omit the plugin entirely — while the plugin itself is
+  perfectly installed. Use `env HERMES_HOME=… hermes …` per command, or
+  `unset HERMES_HOME` afterwards. (Debugging that phantom cost an hour.)
+- **Verifying portability from one machine.** `tests/test_platforms.py` pins
+  both layouts without a Windows host, drives the "no third-party imports" rule
+  by importing the engine in a clean interpreter and comparing module sets, and
+  the generated monitor script is executed for real.
 
 ## Invariants pinned by tests
 
