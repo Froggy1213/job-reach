@@ -30,10 +30,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
+from datetime import datetime, timezone
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
-from aiogram.fsm.storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
@@ -48,6 +49,7 @@ from database.models import Base
 from database.sqlalchemy_repository import SQLAlchemyJobRepository, SQLAlchemySubscriberRepository
 from scrapers.implementations.mynavi2027 import Mynavi2027Scraper
 from scrapers.implementations.wantedly import WantedlyScraper
+from scrapers.cli.linkedin import LinkedInScraper
 from scrapers.orchestrator import ScraperOrchestrator
 from services.notifier import ScrapeNotifierService
 
@@ -96,6 +98,7 @@ async def main() -> None:
     scrapers = [
         Mynavi2027Scraper(headless=settings.playwright_headless, timeout_ms=settings.playwright_timeout_ms),
         WantedlyScraper(headless=settings.playwright_headless, timeout_ms=settings.playwright_timeout_ms),
+        LinkedInScraper(headless=settings.playwright_headless, timeout_ms=settings.playwright_timeout_ms),
     ]
     orchestrator = ScraperOrchestrator(scrapers, repository)
     logger.info(
@@ -116,7 +119,7 @@ async def main() -> None:
         token=settings.bot_token,
         default=DefaultBotProperties(parse_mode=None),
     )
-    dp = Dispatcher(storage=MemoryStorage())
+    dp = Dispatcher()
 
     # Middleware -- injects Container into every handler's data dict
     dp.message.middleware(ContainerMiddleware(container))
@@ -137,24 +140,54 @@ async def main() -> None:
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         notifier.run_scrape_and_notify,
-        trigger=IntervalTrigger(hours=4),
+        trigger=IntervalTrigger(hours=settings.scrape_interval_hours),
         id="scheduled_scrape",
         name="Periodic job board scrape",
         replace_existing=True,
+        next_run_time=datetime.now(timezone.utc),  # run immediately on startup
     )
     scheduler.start()
-    logger.info("Scheduler started (interval: 4 hours)")
+    logger.info(
+        "Scheduler started",
+        extra={"interval_hours": settings.scrape_interval_hours},
+    )
 
-    # ---- 8. Polling ----
+    # ---- 8. Graceful shutdown ----
+    loop = asyncio.get_running_loop()
+    shutdown_event = asyncio.Event()
+
+    def _signal_handler(sig: signal.Signals) -> None:
+        logger.info("Received signal %s, initiating graceful shutdown", sig.name)
+        shutdown_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, _signal_handler, sig)
+
+    # ---- 9. Polling ----
     logger.info("Bot starting polling")
-    try:
-        await dp.start_polling(bot)
-    finally:
-        logger.info("Shutting down")
-        scheduler.shutdown(wait=False)
-        await bot.session.close()
-        await engine.dispose()
-        logger.info("Shutdown complete")
+    polling_task = asyncio.create_task(dp.start_polling(bot))
+
+    # Wait for either the shutdown signal or polling to end on its own.
+    done, _ = await asyncio.wait(
+        [polling_task, asyncio.create_task(shutdown_event.wait())],
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+
+    # ---- 10. Cleanup ----
+    logger.info("Shutting down")
+    scheduler.shutdown(wait=False)
+
+    if not polling_task.done():
+        await dp.stop_polling()
+        polling_task.cancel()
+        try:
+            await polling_task
+        except asyncio.CancelledError:
+            pass
+
+    await bot.session.close()
+    await engine.dispose()
+    logger.info("Shutdown complete")
 
 
 if __name__ == "__main__":

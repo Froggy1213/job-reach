@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 
 from playwright.async_api import Page, async_playwright
+from playwright_stealth import Stealth
 
 from models.enums import SourcePlatform
 from models.job_posting import JobPosting
@@ -38,7 +39,7 @@ class Mynavi2027Scraper(BaseScraper):
     _user_agent: str = (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
+        "Chrome/137.0.0.0 Safari/537.36"
     )
 
     @property
@@ -64,6 +65,7 @@ class Mynavi2027Scraper(BaseScraper):
                     viewport={"width": 1280, "height": 900},
                 )
                 page = await context.new_page()
+                await Stealth().apply_stealth_async(page)
 
                 for occ in _OCC_CODES:
                     url = f"{_BASE_URL}/27/pc/search/occ{occ}.html"
@@ -100,7 +102,7 @@ class Mynavi2027Scraper(BaseScraper):
 
         await page.goto(base_url, wait_until="domcontentloaded", timeout=_NAV_TIMEOUT)
         await self._wait_for_cards(page)
-        jobs.extend(await self.parse_page(page, occ, seen_urls))
+        jobs.extend(await self._parse_page_with_context(page, occ, seen_urls))
 
         if _MAX_PAGES <= 1:
             return jobs
@@ -116,7 +118,7 @@ class Mynavi2027Scraper(BaseScraper):
             await page.wait_for_load_state("domcontentloaded", timeout=_NAV_TIMEOUT)
             await self._wait_for_cards(page)
 
-            page_jobs = await self.parse_page(page, occ, seen_urls)
+            page_jobs = await self._parse_page_with_context(page, occ, seen_urls)
             if not page_jobs:
                 break
             jobs.extend(page_jobs)
@@ -135,13 +137,18 @@ class Mynavi2027Scraper(BaseScraper):
     # Card extraction (batch via page.evaluate)
     # ------------------------------------------------------------------
 
-    async def parse_page(
+    async def _parse_page_with_context(
         self,
         page: Page,
         occ_code: str,
         seen_urls: set[str],
     ) -> list[JobPosting]:
-        """Extract company cards from the current page via one JS round-trip."""
+        """Extract company cards from the current page via one JS round-trip.
+
+        This is intentionally NOT ``parse_page(page)`` — it requires
+        extra context (occupation code and dedup set) that the base
+        class contract does not provide.
+        """
         occ_label = _OCC_LABELS.get(occ_code, occ_code)
 
         raw_items: list[dict] = await page.evaluate(
@@ -164,16 +171,16 @@ class Mynavi2027Scraper(BaseScraper):
 
                         const company = link.textContent.trim();
 
-                        // Ищем родительский элемент карточки
-                        const card = link.closest('.boxSearchbox') 
+                        // Find parent card container
+                        const card = link.closest('.boxSearchbox')
                                   || link.closest('li')
                                   || link.closest('[class*="corp"]')
                                   || link.closest('[class*="company"]');
 
-                        // Достаем весь текст карточки, убираем лишние пробелы и переносы
+                        // Extract card text, collapse whitespace
                         const cardText = card ? card.innerText.replace(/\\s+/g, ' ').trim() : '';
-                        
-                        // Формируем честный title: Название компании + кусок описания из карточки
+
+                        // Build title: company name + excerpt from card description
                         const title = company + " | " + cardText.substring(0, 400);
 
                         const location = /東京/.test(cardText) ? 'Tokyo' : 'Japan';
@@ -205,13 +212,15 @@ class Mynavi2027Scraper(BaseScraper):
                     continue
                 seen_urls.add(url)
 
-                # Теперь наш жесткий фильтр проверяет реальный текст карточки!
+                # Title filter checks the full card text for relevance.
+                # ``matches`` honours a custom --keyword when one was given,
+                # otherwise falls back to the built-in design filter.
                 title = str(item["title"])
-                if not self.is_target_job(title):
-                    logger.debug("Skipping non-target (failed strict filter): %s", str(item["company"]))
+                if not self.matches(title):
+                    logger.debug("Skipping non-matching card: %s", str(item["company"]))
                     continue
 
-                # Для сохранения в БД оставляем аккуратное название (Компания + Категория)
+                # Store a clean title: Company (Occupation Category)
                 clean_title = f"{str(item['company'])[:100]} ({occ_label})"
 
                 cards.append(JobPosting(

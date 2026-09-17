@@ -25,3 +25,19 @@ class SourcePlatform(StrEnum):
 
     MYNAVI_2027 = "mynavi_2027"
     """Mynavi 2027 新卒 (job.mynavi.jp) -- new graduate recruitment."""
+
+    INDEED = "indeed"
+    """Indeed Japan (jp.indeed.com) -- aggregator behind Cloudflare.
+
+    There is no local scraper: Indeed blocks headless/HTTP scraping, but a
+    real browser passes the Cloudflare check.  Listings are fetched with a
+    real browser (Hermes browser tools) and fed in via ``search_cli.py
+    --ingest``.
+    """
+
+    LINKEDIN = "linkedin"
+    """LinkedIn Jobs -- scraped via ``opencli linkedin`` CLI (Chrome-based).
+
+    Requires Chrome running with the OpenCLI extension.  No Playwright needed
+    -- the CLI handles browser automation and returns structured JSON.
+    """

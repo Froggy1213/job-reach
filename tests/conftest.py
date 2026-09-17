@@ -23,6 +23,7 @@ def settings() -> Settings:
         DATABASE_URL="sqlite+aiosqlite:///./test_jobs.db",
         LOG_LEVEL="WARNING",
         PLAYWRIGHT_HEADLESS="true",
+        ADMIN_CHAT_ID=0,
     )
 
 

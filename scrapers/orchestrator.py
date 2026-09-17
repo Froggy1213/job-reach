@@ -14,7 +14,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Sequence
 
-from database.repository import JobRepository
+from database.repository import JobRepository, normalize_url
 from models.enums import SourcePlatform
 from models.job_posting import JobPosting
 from scrapers.base import BaseScraper
@@ -109,8 +109,8 @@ class ScraperOrchestrator:
     async def _run_one(self, scraper: BaseScraper) -> tuple[int, list[JobPosting]]:
         """Execute a single scraper, deduplicate, and persist.
 
-        Uses a single bulk query to check existing URLs instead of one
-        ``exists()`` call per job (fixes the N+1 problem).
+        Uses URL normalization + a single bulk query to check existing
+        URLs, then batch-inserts all new jobs in one transaction.
 
         Returns a tuple of (count of new jobs, list of new JobPosting objects).
         """
@@ -120,28 +120,28 @@ class ScraperOrchestrator:
             extra={"platform": scraper.platform.value, "count": len(jobs)},
         )
 
-        # Bulk check: one DB round-trip instead of N.
-        urls = [str(job.url) for job in jobs]
+        # Normalize URLs for consistent deduplication.
+        urls = [normalize_url(str(job.url)) for job in jobs]
         existing_urls = await self._repository.get_existing_urls(urls)
 
-        new_count = 0
         new_jobs: list[JobPosting] = []
-        for job in jobs:
-            url_str = str(job.url)
-            if url_str in existing_urls:
-                logger.debug("Skipping duplicate", extra={"url": url_str})
+        for job, norm_url in zip(jobs, urls):
+            if norm_url in existing_urls:
+                logger.debug("Skipping duplicate", extra={"url": norm_url})
                 continue
-
-            await self._repository.save(job)
-            new_count += 1
             new_jobs.append(job)
+
+        # Batch insert all new jobs in one transaction.
+        if new_jobs:
+            await self._repository.save_many(new_jobs)
 
         logger.info(
             "Scraper finished",
             extra={
                 "platform": scraper.platform.value,
                 "total": len(jobs),
-                "new": new_count,
+                "new": len(new_jobs),
             },
         )
-        return new_count, new_jobs
+        return len(new_jobs), new_jobs
+

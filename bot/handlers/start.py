@@ -6,6 +6,7 @@ from aiogram.types import Message
 
 from bot.utils import main_keyboard
 from core.container import Container
+from models.enums import SourcePlatform
 
 router = Router(name="start_handler")
 
@@ -31,14 +32,12 @@ async def cmd_start(message: Message) -> None:
 @router.message(Command("stats"))
 async def cmd_stats(message: Message, container: Container) -> None:
     """Show job counts per platform."""
-    from models.enums import SourcePlatform
-
     lines = ["<b>📊 Job Statistics</b>\n"]
     total = 0
 
+    repo = Container.require(container.repository, "repository")
     for platform in SourcePlatform:
-        jobs = await container.repository.get_by_source(platform)
-        count = len(jobs)
+        count = await repo.count_jobs(source=platform)
         total += count
         lines.append(f"• <code>{platform.value}</code>: {count}")
 
@@ -60,7 +59,8 @@ async def cmd_subscribe(message: Message, container: Container) -> None:
         return
 
     chat_id = message.from_user.id
-    added = await container.subscriber_repository.add_subscriber(chat_id)
+    sub_repo = Container.require(container.subscriber_repository, "subscriber_repository")
+    added = await sub_repo.add_subscriber(chat_id)
 
     if added:
         await message.answer(
@@ -83,7 +83,8 @@ async def cmd_unsubscribe(message: Message, container: Container) -> None:
         return
 
     chat_id = message.from_user.id
-    removed = await container.subscriber_repository.remove_subscriber(chat_id)
+    sub_repo = Container.require(container.subscriber_repository, "subscriber_repository")
+    removed = await sub_repo.remove_subscriber(chat_id)
 
     if removed:
         await message.answer(

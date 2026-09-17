@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 
 from pydantic import HttpUrl
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.exceptions import RepositoryError
@@ -116,8 +116,6 @@ class SQLAlchemyJobRepository(JobRepository):
         """Count jobs, with optional source filter."""
         try:
             async with self._session_factory() as session:
-                from sqlalchemy import func
-
                 stmt = select(func.count(JobModel.id))
                 if source is not None:
                     stmt = stmt.where(JobModel.source_platform == source)
@@ -172,6 +170,25 @@ class SQLAlchemyJobRepository(JobRepository):
             posted_at=job.posted_at,
             scraped_at=job.scraped_at,
         )
+
+    async def save_many(self, jobs: list[JobPosting]) -> list[JobPosting]:
+        """Persist multiple job postings in a single transaction."""
+        if not jobs:
+            return []
+        try:
+            async with self._session_factory() as session:
+                models = [self._domain_to_model(j) for j in jobs]
+                session.add_all(models)
+                await session.commit()
+                for m in models:
+                    await session.refresh(m)
+                logger.debug(
+                    "Batch saved jobs",
+                    extra={"count": len(models)},
+                )
+                return [self._model_to_domain(m) for m in models]
+        except Exception as exc:
+            raise RepositoryError(f"Failed to batch save {len(jobs)} jobs: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -233,8 +250,6 @@ class SQLAlchemySubscriberRepository:
         """Return all subscribed chat IDs."""
         try:
             async with self._session_factory() as session:
-                from sqlalchemy import select
-
                 result = await session.execute(select(SubscriberModel.chat_id))
                 return [row for row in result.scalars().all()]
         except Exception as exc:

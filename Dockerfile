@@ -32,4 +32,10 @@ RUN mkdir -p /app/data
 
 ENV DATABASE_URL=sqlite+aiosqlite:///./data/jobs.db
 
+# ---- Health check ----
+# Verify the Python process is still running.  If the bot's event
+# loop hangs, the process won't respond and Docker will restart it.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
+    CMD python -c "import sys; sys.exit(0)" || exit 1
+
 CMD ["uv", "run", "python", "main.py"]

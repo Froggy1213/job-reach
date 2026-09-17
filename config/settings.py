@@ -52,3 +52,8 @@ class Settings(BaseSettings):
         validation_alias="PLAYWRIGHT_TIMEOUT_MS",
         description="Playwright page navigation timeout in milliseconds.",
     )
+    scrape_interval_hours: float = Field(
+        default=4.0,
+        validation_alias="SCRAPE_INTERVAL_HOURS",
+        description="Hours between scheduled scrape runs. Defaults to 4 hours.",
+    )

@@ -40,9 +40,9 @@ async def cmd_jobs(
     container: Container,
 ) -> None:
     """Handle /jobs [source] — show paginated job listings."""
-    source = _parse_source(command.args)
-    if source is False:
-        # Invalid source name -- error already sent by _parse_source.
+    try:
+        source = _parse_source(command.args)
+    except ValueError:
         valid = ", ".join(p.value for p in SourcePlatform)
         await message.answer(
             f"❓ Unknown source. Available: {valid}",
@@ -67,9 +67,15 @@ async def on_jobs_page(callback: CallbackQuery, container: Container) -> None:
     - ``page``: 0-based page index
     - ``source``: ``"all"`` or a SourcePlatform value
     """
+    if not callback.data:
+        return
+
     _, page_str, source_str = callback.data.split(":", 2)
     page = int(page_str)
     source = None if source_str == "all" else SourcePlatform(source_str)
+
+    if not isinstance(callback.message, Message):
+        return
 
     await _show_page(callback.message, container, page=page, source=source, edit=True)
     await callback.answer()
@@ -98,12 +104,13 @@ async def _show_page(
         edit: If True, edit *msg* in-place; otherwise send a new message.
     """
     # Fetch with server-side pagination.
-    total = await container.repository.count_jobs(source)
+    repo = Container.require(container.repository, "repository")
+    total = await repo.count_jobs(source)
     total_pages = max(1, (total + _JOBS_PER_PAGE - 1) // _JOBS_PER_PAGE)
     page = max(0, min(page, total_pages - 1))
 
     offset = page * _JOBS_PER_PAGE
-    page_jobs = await container.repository.get_jobs_page(
+    page_jobs = await repo.get_jobs_page(
         limit=_JOBS_PER_PAGE, offset=offset, source=source,
     )
 
@@ -151,19 +158,19 @@ async def _show_page(
 # ---------------------------------------------------------------------------
 
 
-def _parse_source(args: str | None) -> SourcePlatform | None | bool:
+def _parse_source(args: str | None) -> SourcePlatform | None:
     """Parse an optional source argument.
 
     Returns:
-        A ``SourcePlatform``, ``None`` (no filter), or ``False`` (invalid).
+        A ``SourcePlatform`` or ``None`` (no filter).
+
+    Raises:
+        ValueError: If the argument is not a valid ``SourcePlatform`` value.
     """
     if not args or not args.strip():
         return None
     source_str = args.strip().lower()
-    try:
-        return SourcePlatform(source_str)
-    except ValueError:
-        return False
+    return SourcePlatform(source_str)
 
 
 def _build_nav_keyboard(
@@ -200,14 +207,16 @@ def _build_nav_keyboard(
 @router.message(Command("scrape"))
 async def cmd_scrape(message: Message, container: Container) -> None:
     """Manually trigger a full scrape cycle.  Admin only."""
-    if message.from_user is None or message.from_user.id != container.settings.admin_chat_id:
+    settings = Container.require(container.settings, "settings")
+    if message.from_user is None or message.from_user.id != settings.admin_chat_id:
         return
 
     status_msg = await message.answer(
         "⏳ Starting scrape...", reply_markup=main_keyboard(),
     )
 
-    result = await container.orchestrator.run_all()
+    orchestrator = Container.require(container.orchestrator, "orchestrator")
+    result = await orchestrator.run_all()
     total_new = sum(result.counts.values())
 
     if total_new > 0:

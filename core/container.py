@@ -10,13 +10,17 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
+
+from core.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
     from config.settings import Settings
     from database.repository import JobRepository
     from database.sqlalchemy_repository import SQLAlchemySubscriberRepository
     from scrapers.orchestrator import ScraperOrchestrator
+
+_T = TypeVar("_T")
 
 
 @dataclass
@@ -45,3 +49,19 @@ class Container:
 
     logger: logging.Logger | None = field(default=None, repr=False)
     """Configured root logger for the application."""
+
+    @staticmethod
+    def require(value: _T | None, name: str) -> _T:
+        """Return *value* if it is not ``None``, else raise.
+
+        Handlers should call this to get a clear error message when a
+        dependency was not wired during startup::
+
+            repo = Container.require(container.repository, "repository")
+        """
+        if value is None:
+            raise ConfigurationError(
+                f"Container.{name} is None — did you forget to wire it in main.py?"
+            )
+        return value
+

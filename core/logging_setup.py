@@ -15,6 +15,15 @@ from datetime import datetime, timezone
 class _JSONFormatter(logging.Formatter):
     """Formats log records as single-line JSON objects."""
 
+    # Standard LogRecord attributes that should NOT appear in "extra".
+    _BUILTIN_ATTRS: frozenset[str] = frozenset({
+        "args", "created", "exc_info", "exc_text", "filename",
+        "funcName", "levelname", "levelno", "lineno", "message",
+        "module", "msecs", "msg", "name", "pathname", "process",
+        "processName", "relativeCreated", "stack_info", "thread",
+        "threadName", "taskName",
+    })
+
     def format(self, record: logging.LogRecord) -> str:
         payload = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -22,6 +31,10 @@ class _JSONFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
+        # Include any extra={...} fields passed by the caller.
+        for key, value in record.__dict__.items():
+            if key not in self._BUILTIN_ATTRS and not key.startswith("_"):
+                payload[key] = value
         if record.exc_info and record.exc_info[1] is not None:
             payload["exception"] = str(record.exc_info[1])
         return json.dumps(payload, ensure_ascii=False, default=str)

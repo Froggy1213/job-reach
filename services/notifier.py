@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from html import escape as _esc
 from typing import TYPE_CHECKING
 
 from aiogram.exceptions import TelegramRetryAfter
+
+from bot.utils import job_card_no_index
 
 if TYPE_CHECKING:
     from aiogram import Bot
@@ -88,19 +89,7 @@ class ScrapeNotifierService:
     @staticmethod
     def _format_broadcast_card(job: JobPosting) -> str:
         """Format a single job posting for broadcast (no index number)."""
-        title = _esc(job.title)
-        company = _esc(job.company)
-        location = _esc(job.location)
-        salary = _esc(job.salary or "—")
-        url = _esc(str(job.url))
-        source = _esc(job.source_platform.value)
-
-        return (
-            f'<b><a href="{url}">{title}</a></b>\n'
-            f"\U0001f3e2 {company}\n"
-            f"\U0001f4cd {location}  |  \U0001f4b0 {salary}\n"
-            f"\U0001f4e1 <code>{source}</code>"
-        )
+        return job_card_no_index(job)
 
     async def _send_admin_summary(
         self,
