@@ -1,18 +1,24 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
-.env
 .venv/
-*.db
-data/
-playwright/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
+venv/
+build/
 dist/
-.claude/
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
+
+# Runtime state — belongs in $HERMES_HOME/plugin-data/job-hunter, never here.
+*.db
+*.db-wal
+*.db-shm
+jobs.db*
+
+# Local configuration
+.env
+.env.local
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+coverage.xml
+.DS_Store
