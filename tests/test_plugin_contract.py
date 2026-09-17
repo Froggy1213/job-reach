@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -299,16 +300,49 @@ def test_install_cron_reports_a_missing_hermes(
         install_cron()
 
 
+def test_command_line_quoting_matches_the_platform(monkeypatch: pytest.MonkeyPatch):
+    """A printed command must be pasteable into the shell the user is in."""
+    from jobreach.install import command_line
+
+    argv = ["hermes", "cron", "create", "0 9 * * *", "find jobs", "--name", "job-reach-monitor"]
+    posix = command_line(argv)
+    assert '"0 9 * * *"' in posix and '"find jobs"' in posix
+
+    monkeypatch.setattr("jobreach.install.is_windows", lambda: True)
+    windows = command_line(argv)
+    assert windows.count('"') >= 4
+    assert windows.startswith("hermes cron create")
+
+
 def test_monitor_script_is_pinned_to_the_engine(data_home: Path):
+    """The monitor is Python, not bash — that is what makes Windows work.
+
+    Hermes runs a cron script by extension: ``.sh``/``.bash`` go through bash
+    (absent on a stock Windows install), anything else through Hermes' own
+    interpreter. So the generated file must be importable Python that names both
+    the plugin directory and the engine interpreter.
+    """
     from jobreach.install import MONITOR_SCRIPT_NAME, install_monitor_script
 
     path = install_monitor_script(["--keyword", "designer"])
     assert path.name == MONITOR_SCRIPT_NAME
-    body = path.read_text(encoding="utf-8")
-    assert "-m jobreach monitor" in body
-    assert "--keyword designer" in body
-    assert str(PROJECT_ROOT) in body
-    assert path.stat().st_mode & 0o111, "the monitor script must be executable"
+    assert path.suffix == ".py"
+
+    module = load_python_file(path)
+    assert str(PROJECT_ROOT) == module.PLUGIN_DIR
+    assert module.ENGINE  # the engine interpreter is baked in
+    assert module.ARGS == ["--keyword", "designer"]
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o111, "the monitor script must be executable"
+
+
+def load_python_file(path: Path):
+    """Import a generated script without running its ``__main__`` block."""
+    spec = importlib.util.spec_from_file_location("jobreach_generated_monitor", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 # --------------------------------------------------------------------------- #

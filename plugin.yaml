@@ -1,5 +1,5 @@
 name: job-reach
-version: "2.2.0"
+version: "2.3.0"
 description: >-
   Search Japanese job boards (Wantedly, Indeed, Green, Daijob, Japan Dev,
   Mynavi 2027, LinkedIn) and track which listings are new since the last run.
@@ -11,6 +11,21 @@ homepage: https://github.com/Froggy1213/job-reach
 manifest_version: 2
 requires_hermes: ">=0.21"
 kind: standalone
+
+# Where this plugin runs. The engine is standard-library Python, the browser
+# work is delegated to Scrapling/Playwright (both cross-platform), and the cron
+# monitor script is generated as Python, so all three desktop platforms are
+# supported — see the README's "Requirements & platform support".
+platforms:
+  - macos
+  - linux
+  - windows
+
+# Nothing to install: the engine imports only the standard library. The browser
+# stack that two of the seven boards need is looked up at run time (Scrapling,
+# or the venv `job_setup` builds) and is deliberately NOT a plugin dependency —
+# declared here only so the answer to "does this pull in packages?" is explicit.
+python_dependencies: []
 
 tags:
   - jobs

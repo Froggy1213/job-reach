@@ -13,7 +13,8 @@ So the tools spawn ``python -m jobreach`` and this module decides *which*
 python:
 
 1. ``$JOBREACH_PYTHON``                  — explicit operator override
-2. ``$JOBREACH_HOME/venv/bin/python``    — created by ``hermes job-reach setup``
+2. ``$JOBREACH_HOME/venv``              — created by ``hermes job-reach setup``
+   (its interpreter is ``bin/python`` or ``Scripts/python.exe``)
 3. ``sys.executable``                     — works for everything except scraping,
                                              because the core is stdlib-only
 
@@ -25,7 +26,9 @@ Chromium (~150 MB). Both paths are reported by ``doctor``, board by board.
 
 The venv lives under ``$JOBREACH_HOME`` (default
 ``~/.hermes/plugin-data/job-reach``), not inside the plugin directory, so
-``hermes plugins update`` cannot wipe it.
+``hermes plugins update`` cannot wipe it. Its interpreter is found in the
+platform's own layout (``venv/bin/python``, or ``venv\\Scripts\\python.exe`` on
+Windows) — see :mod:`jobreach.platforms`.
 """
 
 from __future__ import annotations
@@ -43,6 +46,8 @@ from typing import Any
 from . import __version__
 from .config import jobreach_home, plugin_dir, python_override
 from .logging_setup import get_logger
+from .platforms import uv_candidates, venv_bin_dir
+from .platforms import venv_python as venv_python_path
 from .proc import run_captured
 from .scrapers.base import PLAYWRIGHT_HINT
 
@@ -70,19 +75,14 @@ SMOKE_TEST_TIMEOUT = 120.0
 
 
 def uv_path() -> str | None:
-    """Locate ``uv``: env override, PATH, then the copy Hermes ships."""
+    """Locate ``uv``: env override, PATH, then the usual per-platform homes."""
     override = os.environ.get("JOBREACH_UV", "").strip()
     if override and Path(override).exists():
         return override
     found = shutil.which("uv")
     if found:
         return found
-    for candidate in (
-        Path.home() / ".hermes" / "bin" / "uv",
-        Path.home() / ".local" / "bin" / "uv",
-        Path("/opt/homebrew/bin/uv"),
-        Path("/usr/local/bin/uv"),
-    ):
+    for candidate in uv_candidates():
         if candidate.exists():
             return str(candidate)
     return None
@@ -94,8 +94,8 @@ def venv_dir() -> Path:
 
 
 def venv_python() -> Path | None:
-    """The venv's interpreter, if the venv exists."""
-    candidate = venv_dir() / "bin" / "python"
+    """The venv's interpreter, if the venv exists (``Scripts`` on Windows)."""
+    candidate = venv_python_path(venv_dir())
     return candidate if candidate.exists() else None
 
 
@@ -272,7 +272,7 @@ def setup_runtime(*, with_browser: bool = True, force: bool = False) -> SetupRep
 
     python = venv_python()
     if python is None:  # pragma: no cover - only if creation silently failed
-        report.add("venv", False, f"no interpreter at {target}/bin/python")
+        report.add("venv", False, f"no interpreter at {venv_bin_dir(venv_dir())}")
         return report
     report.venv = str(python)
 

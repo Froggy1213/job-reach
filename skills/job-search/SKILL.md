@@ -1,10 +1,10 @@
 ---
 name: job-search
 description: Find jobs on Japanese boards and track what is new.
-version: 2.2.0
+version: 2.3.0
 author: Froggy1213
 license: MIT
-platforms: [macos, linux]
+platforms: [macos, linux, windows]
 metadata:
   hermes:
     tags: [jobs, japan, career, wantedly, mynavi, linkedin, indeed, obsidian, monitoring]
@@ -36,6 +36,14 @@ changes instead of the same 40 cards.
 **Don't use for:** reading one already-known job URL (fetch it directly), or
 writing your own scraper for a board not listed here (that is ordinary
 development work). For non-Japanese boards use the relevant dedicated tool.
+
+## Requirements
+
+Nothing to install for the tools themselves (macOS, Linux and Windows are all
+supported). Four boards need no extra software at all; `indeed` and `mynavi2027`
+need a browser backend (Scrapling, which the plugin auto-detects, or the venv
+`job_setup` builds); `linkedin` needs `opencli` with Chrome running. No MCP
+server is involved. `job_status` reports exactly what this machine has.
 
 ## The tools
 

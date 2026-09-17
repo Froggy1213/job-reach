@@ -6,6 +6,10 @@
 Seven tools are now available: `job_search`, `job_ingest`, `job_list`,
 `job_note`, `job_status`, `job_setup`, `job_cron`.
 
+Works on macOS, Linux and Windows. Nothing else to install: four of the seven
+boards (Wantedly, Green, Daijob, Japan Dev) are read over plain HTTP, and the
+plugin needs no MCP server and no Python packages.
+
 ### 1. Enable the plugin
 
 ```bash

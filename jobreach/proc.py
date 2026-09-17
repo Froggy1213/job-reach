@@ -5,17 +5,21 @@ the LinkedIn scraper spawns ``opencli``. Both can outlive a naive timeout,
 because the process we start is rarely the process doing the work.
 
 ``subprocess.run(timeout=...)`` kills only the **direct child** it started, and
-that is not enough here: ``python -m jobreach`` launches Playwright, which
-launches a Node driver, which launches Chromium. Kill the Python parent and the
-three descendants below it are reparented to init and keep running — so a hung
-scrape inside a frequently-ticking ``hermes cron`` job would quietly accumulate
-orphaned browsers.
+that is not enough here: ``python -m jobreach`` launches a browser stack, which
+launches its own driver and browser processes. Kill the Python parent and the
+descendants below it keep running — so a hung scrape inside a frequently-ticking
+``hermes cron`` job would quietly accumulate orphaned browsers.
 
-The fix is to start each child in its own session (which makes it a process
-group leader) and signal the whole group: SIGTERM first so Chromium can shut
-down cleanly, then SIGKILL for anything that ignores it. The group id is
-captured *before* any waiting, because ``os.getpgid()`` stops resolving once the
-direct child has been reaped.
+How the tree is torn down is the one genuinely platform-specific thing here, so
+it lives in :mod:`jobreach.platforms`:
+
+* **POSIX** — each child gets its own session (making it a process-group
+  leader) and the whole group is signalled: SIGTERM first so a browser can shut
+  down cleanly, then SIGKILL for anything that ignores it. The group id is
+  captured *before* any waiting, because ``os.getpgid()`` stops resolving once
+  the direct child has been reaped.
+* **Windows** — there are no process groups to signal, so ``taskkill /F /T``
+  (tree kill) does the same job by pid.
 """
 
 from __future__ import annotations
@@ -28,6 +32,8 @@ from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from pathlib import Path
 
+from .platforms import popen_kwargs, process_tree_kill_argv
+
 #: Grace period between SIGTERM and SIGKILL when tearing a process group down.
 TERM_GRACE_SECONDS = 5.0
 
@@ -37,6 +43,9 @@ DRAIN_SECONDS = 5.0
 
 #: Polling interval while waiting for a process group to go quiet.
 POLL_SECONDS = 0.05
+
+#: Ceiling for one ``taskkill`` call — it either works instantly or not at all.
+TASKKILL_TIMEOUT = 15.0
 
 
 def run_captured(
@@ -51,7 +60,7 @@ def run_captured(
 
     Args:
         argv: Command and arguments.
-        timeout: Seconds to wait. On expiry the entire process group is
+        timeout: Seconds to wait. On expiry the entire process tree is
             terminated and :class:`subprocess.TimeoutExpired` is raised.
         stdin: Text piped to the child's stdin (closed right after).
         cwd: Working directory for the child.
@@ -73,9 +82,9 @@ def run_captured(
         text=True,
         cwd=str(cwd) if cwd is not None else None,
         env=dict(env) if env is not None else None,
-        # Own session => own process group => one signal reaches every
-        # descendant, Chromium included.
-        start_new_session=True,
+        # Own session on POSIX, own process group on Windows — one signal then
+        # reaches every descendant, browsers included.
+        **popen_kwargs(),
     )
     # Resolve the group id now: once the direct child is reaped, getpgid() on
     # its pid raises, and we would lose the handle to its still-running
@@ -117,12 +126,32 @@ def _process_group(process: subprocess.Popen) -> int | None:
 
 
 def _terminate_tree(process: subprocess.Popen, pgid: int | None) -> None:
-    """SIGTERM the group, then SIGKILL whatever is still standing."""
+    """SIGTERM the group, then SIGKILL whatever is still standing.
+
+    Windows has no process group to signal, so the tree is taken down with
+    ``taskkill /F /T`` instead — killing only the direct child would leave the
+    browser stack running.
+    """
+    argv = process_tree_kill_argv(process.pid)
+    if argv is not None:
+        _taskkill(argv, process)
+        return
     _signal(process, pgid, signal.SIGTERM)
     if _wait_for_quiet(process, pgid, TERM_GRACE_SECONDS):
         return
     _signal(process, pgid, signal.SIGKILL)
     _wait_for_quiet(process, pgid, TERM_GRACE_SECONDS)
+
+
+def _taskkill(argv: list[str], process: subprocess.Popen) -> None:
+    """Kill a process tree on Windows, falling back to the direct child."""
+    try:
+        subprocess.run(argv, capture_output=True, timeout=TASKKILL_TIMEOUT, check=False)
+    except (OSError, subprocess.SubprocessError):
+        with suppress(ProcessLookupError, OSError):
+            process.kill()
+        return
+    _wait(process, TERM_GRACE_SECONDS)
 
 
 def _signal(process: subprocess.Popen, pgid: int | None, sig: int) -> None:

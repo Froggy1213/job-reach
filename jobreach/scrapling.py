@@ -36,6 +36,7 @@ from pathlib import Path
 
 from .errors import MissingDependencyError, ScraperError
 from .logging_setup import get_logger
+from .platforms import venv_python
 from .proc import run_captured
 
 logger = get_logger("scrapling")
@@ -66,14 +67,17 @@ INSTALL_HINT = (
     "Scrapling provides the stealth browser this board needs:\n"
     "  uv tool install 'scrapling[fetchers]' && scrapling install\n"
     "then point the plugin at it if it is not on PATH:\n"
-    f"  export {SCRAPLING_PYTHON_ENV}=/path/to/venv/bin/python"
+    f"  {SCRAPLING_PYTHON_ENV}=/path/to/venv/Scripts/python.exe   (Windows)\n"
+    f"  {SCRAPLING_PYTHON_ENV}=/path/to/venv/bin/python           (macOS/Linux)"
 )
 
 PLAYWRIGHT_FALLBACK_HINT = (
     "Install a browser backend:\n"
     "  hermes job-reach setup            # plugin venv + Playwright + Chromium (~150 MB)\n"
     "or use Scrapling if it is already installed:\n"
-    f"  export {SCRAPLING_PYTHON_ENV}=/path/to/venv/bin/python"
+    f"  {SCRAPLING_PYTHON_ENV}=/path/to/venv/<Scripts|bin>/python\n"
+    "Note: the four browser-free boards (wantedly, green, daijob, japandev) "
+    "work without any of this."
 )
 
 
@@ -88,7 +92,11 @@ def driver_path() -> Path:
 
 
 def _candidate_pythons() -> list[tuple[str, str]]:
-    """Candidate interpreters with the rule that produced each one."""
+    """Candidate interpreters with the rule that produced each one.
+
+    Paths follow the platform's virtualenv layout (``bin`` vs ``Scripts``), so a
+    Windows install is found by the same logic as a POSIX one.
+    """
     candidates: list[tuple[str, str]] = []
 
     override = os.environ.get(SCRAPLING_PYTHON_ENV, "").strip()
@@ -97,17 +105,18 @@ def _candidate_pythons() -> list[tuple[str, str]]:
 
     executable = shutil.which("scrapling")
     if executable:
-        # A console script lives in <venv>/bin, so its sibling is the venv's
-        # python. Resolve the symlink first: uv/pipx shim the binary.
-        venv_bin = Path(executable).resolve().parent
-        candidates.append((str(venv_bin / "python"), "scrapling on PATH"))
+        # A console script lives beside its interpreter (``bin``/``Scripts``).
+        # Resolve the symlink first: uv and pipx shim the binary.
+        candidates.append((str(venv_python(Path(executable).resolve().parent.parent)), "scrapling on PATH"))
 
     from .config import jobreach_home
 
-    candidates.append((str(jobreach_home() / "venv" / "bin" / "python"), "plugin venv"))
+    candidates.append((str(venv_python(jobreach_home() / "venv")), "plugin venv"))
 
     for template in KNOWN_VENVS:
-        candidates.append((str(Path(template).expanduser() / "bin" / "python"), f"known install {template}"))
+        candidates.append(
+            (str(venv_python(Path(template).expanduser())), f"known install {template}")
+        )
 
     return candidates
 

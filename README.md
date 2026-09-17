@@ -69,6 +69,28 @@ ask for rather than something you perform.
 
 ---
 
+## What changed in 2.3
+
+**The plugin is portable to any Hermes, including on Windows** — and the README
+now says exactly what a host needs (see "Requirements & platform support"
+above). The work was not documentation, it was removing the assumptions:
+
+- `jobreach/platforms.py` collects every OS difference: virtualenv layout
+  (`bin/python` vs `Scripts\python.exe`), `uv` discovery, process-tree teardown
+  (`taskkill /F /T` on Windows), and how a child is isolated from console
+  signals. Each takes an explicit platform argument, so both layouts are
+  unit-tested from one machine.
+- The cron monitor is generated as **Python** instead of bash. Hermes runs
+  `.sh` scripts through bash, which a stock Windows install does not have; a
+  `.py` script runs on all three platforms — verified here by generating it,
+  running it, and checking the digest it printed.
+- `plugin.yaml` declares `platforms: [macos, linux, windows]` and
+  `python_dependencies: []` explicitly, and a new test imports the whole engine
+  in a clean interpreter and asserts that it adds **zero** non-stdlib modules.
+- Printed commands are quoted for the shell the user is actually in.
+
+---
+
 ## What changed in 2.2
 
 Three more boards, chosen so the *cheap* half of the market is covered without a
@@ -139,6 +161,104 @@ Also: `posted_at` is carried through the store and the JSON envelope, and
 
 Every listing is keyed by its normalised URL in a local SQLite store, so each
 run reports genuine changes instead of the same cards again.
+
+---
+
+## Requirements & platform support
+
+**Short version: nothing to install.** The plugin is a Hermes plugin, not a
+service: no MCP server, no daemon, no Docker, no Node, no Python packages. Four
+of the seven boards are read over plain HTTP, so a fresh install can search
+Japan immediately.
+
+### What a host must have
+
+| Requirement | Why | Notes |
+|---|---|---|
+| Hermes ≥ 0.21 | the plugin API this was built against | `requires_hermes` in `plugin.yaml` |
+| Python 3.11+ | the engine uses `StrEnum`, `datetime.UTC`, `slots=True` | Hermes' own runtime (3.14) already qualifies; `hermes job-reach` uses it automatically |
+| Network access to the boards | obvious | HTTPS only |
+
+Deliberately **not** required: an MCP server, a database server, a browser
+install, an API key, a config file. `plugin.yaml` declares
+`python_dependencies: []`, and the engine's standard-library-only rule is
+enforced by a test — importing `jobreach` in a clean interpreter adds exactly
+zero non-stdlib modules.
+
+> **MCP note:** the plugin does **not** need any MCP server. Scrapling is a
+> Python library here, driven directly by a small subprocess driver. If you
+> happen to run Scrapling's own MCP server (for ad-hoc page fetching), that is
+> unrelated — the two share the installed library, nothing more.
+
+### What each board needs
+
+| Board | Extra software | If it is missing |
+|---|---|---|
+| `wantedly`, `green`, `daijob`, `japandev` | **nothing** | always work |
+| `indeed`, `mynavi2027` | a browser backend: Scrapling (preferred) or Playwright | those boards report an actionable error; the other five still run |
+| `linkedin` | `opencli` on `PATH` + Chrome running with its extension | LinkedIn reports `BROWSER_CONNECT`; nothing else is affected |
+
+So the honest answer to "does this pull in dependencies?" is: **only if you want
+Indeed, Mynavi 2027 or LinkedIn**, and only for those boards.
+
+### Installing the optional pieces
+
+```bash
+# Browser backend (Indeed, Mynavi 2027) — pick one:
+
+# a) Scrapling, if it is already on the machine (an existing MCP setup, a venv…)
+#    the plugin auto-detects it; point at it explicitly if detection misses:
+export JOBREACH_SCRAPLING_PYTHON=/path/to/venv/bin/python      # Windows: ...\Scripts\python.exe
+
+# b) or let the plugin build its own Playwright venv (~150 MB, cross-platform)
+hermes job-reach setup
+
+# LinkedIn (optional)
+#   install opencli and keep Chrome running with its extension; verify with
+#   `opencli linkedin whoami`
+```
+
+`hermes job-reach setup` prints what it found and what it skipped; it never
+downloads anything when Scrapling is already available.
+
+### Platform support
+
+| Platform | Status | Notes |
+|---|---|---|
+| macOS | ✅ full | the author's platform; everything here is verified live |
+| Linux | ✅ full | same code paths; no platform-specific assumptions left |
+| Windows | ✅ supported | see below — the platform differences are handled, not documented away |
+
+Windows specifics, because "works on Windows" deserves evidence rather than a
+shrug:
+
+- **Virtualenv layout** — the plugin looks for `venv\Scripts\python.exe`, not
+  `venv/bin/python` (`jobreach/platforms.py`, unit-tested for both layouts).
+- **Process-tree teardown** — a timed-out scrape is killed with
+  `taskkill /F /T /PID` instead of POSIX signals, so the browser stack cannot be
+  left running.
+- **Cron monitoring** — the generated monitor script is **Python**, not bash.
+  Hermes runs `.sh` scripts through bash (absent on a stock Windows install) and
+  everything else through its own interpreter, so a `.py` monitor behaves the
+  same on all three platforms.
+- **`uv` discovery** — includes `%LOCALAPPDATA%\uv\uv.exe` and friends.
+- **Printed commands** — quoted with Windows rules when the shell is Windows.
+- **LinkedIn** is the one third-party caveat: it depends on `opencli` and a
+  Chrome extension, so it is only as portable as that tool is.
+
+The browser boards depend on Scrapling/Playwright, both of which support
+Windows; the plugin's own code has no platform-specific branch left outside
+`jobreach/platforms.py`.
+
+### Verifying an install (any platform)
+
+```bash
+hermes job-reach doctor        # backend, engine interpreter, board-by-board readiness
+```
+
+A healthy output names a browser backend (`scrapling — Scrapling 0.4.x …`) and
+marks all seven boards `ok`. On a host with no browser stack, the four
+HTTP boards are still `ok` and Indeed/Mynavi say what to install.
 
 ---
 
