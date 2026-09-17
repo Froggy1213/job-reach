@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import NOTE_SUBFOLDER, find_vault
+from .domain import PLATFORM_LABELS
 from .errors import ConfigError
 
 #: Characters that are unsafe or awkward in a filename.
@@ -143,8 +144,8 @@ def write_note(
 
 
 def _boards_present(jobs: Iterable[dict[str, Any]], summary: Mapping[str, Any]) -> list[str]:
-    """Boards to render, in a stable order: wantedly → mynavi → linkedin → indeed."""
-    order = ["wantedly", "mynavi_2027", "linkedin", "indeed"]
+    """Boards to render, in the project's canonical board order (see ``domain``)."""
+    order = [str(platform) for platform in PLATFORM_LABELS]
     seen = {str(job.get("source_platform")) for job in jobs}
     seen |= set((summary.get("by_platform") or {}).keys())
     ordered = [board for board in order if board in seen]
@@ -152,15 +153,12 @@ def _boards_present(jobs: Iterable[dict[str, Any]], summary: Mapping[str, Any]) 
     return ordered
 
 
-_LABELS = {
-    "wantedly": "Wantedly",
-    "mynavi_2027": "Mynavi 2027",
-    "linkedin": "LinkedIn",
-    "indeed": "Indeed Japan",
-}
+#: Board id → display name, derived from the domain so the two cannot drift.
+_LABELS: dict[str, str] = {str(platform): label for platform, label in PLATFORM_LABELS.items()}
 
 
 def _label(board: str) -> str:
+    """Display name for a board id; an unknown id falls back to the raw string."""
     return _LABELS.get(board, board)
 
 

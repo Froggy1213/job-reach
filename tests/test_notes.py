@@ -69,6 +69,34 @@ def test_frontmatter_and_groups():
     assert "## Indeed Japan (1 jobs)" in text
 
 
+def test_every_board_renders_with_its_display_label():
+    """Green / Daijob / Japan Dev must not fall back to the raw board id."""
+    text = render_note(
+        {
+            "query": {"keyword": "designer", "location": "tokyo"},
+            "summary": {
+                "total": 3,
+                "new": 0,
+                "by_platform": {"green": {"total": 1, "new": 0},
+                                "daijob": {"total": 1, "new": 0},
+                                "japan_dev": {"total": 1, "new": 0}},
+            },
+            "jobs": [
+                {"title": "Web Designer", "company": "A", "url": "https://g.test/1",
+                 "location": "東京都", "source_platform": "green", "is_new": False},
+                {"title": "Graphic Designer", "company": "B", "url": "https://d.test/2",
+                 "location": "東京都", "source_platform": "daijob", "is_new": False},
+                {"title": "Product Designer", "company": "C", "url": "https://j.test/3",
+                 "location": "Tokyo", "source_platform": "japan_dev", "is_new": False},
+            ],
+        },
+        generated_at=MOMENT,
+    )
+    for heading in ("## Green (1 jobs)", "## Daijob (1 jobs)", "## Japan Dev (1 jobs)"):
+        assert heading in text
+    assert "## green" not in text
+
+
 def test_new_listings_get_a_badge():
     text = render_note(envelope(), generated_at=MOMENT)
     assert "🏷️ NEW [Frontend Engineer](https://w.test/1)" in text
