@@ -155,12 +155,51 @@ def test_query_filters_by_source(repo: SQLiteJobRepository):
     assert not query(repo, source="wantedly", limit=10)
 
 
-def test_scrape_request_rejects_indeed():
-    """`indeed` is ingest-only; asking for it as a scraper must be explicit."""
+def test_search_isolates_a_failing_board(monkeypatch: pytest.MonkeyPatch):
+    """One broken board must never discard the boards that worked.
+
+    The scrape path is stubbed at the registry (``build_scrapers``) rather than
+    by launching a browser: what needs pinning is the orchestration — a failure
+    is reported per board, in ``summary.errors``, while the other board's
+    listings still reach the caller.
+    """
     import asyncio
 
+    from jobreach.domain import JobPosting, SourcePlatform
     from jobreach.pipeline import search
+    from jobreach.scrapers.base import BaseScraper
+
+    class Working(BaseScraper):
+        @property
+        def platform(self) -> SourcePlatform:
+            return SourcePlatform.WANTEDLY
+
+        async def fetch_jobs(self) -> list[JobPosting]:
+            return [
+                JobPosting(
+                    title="UI Designer", company="Acme", url="https://w.test/1",
+                    location="Tokyo", source_platform=self.platform,
+                )
+            ]
+
+    class Broken(BaseScraper):
+        @property
+        def platform(self) -> SourcePlatform:
+            return SourcePlatform.INDEED
+
+        async def fetch_jobs(self) -> list[JobPosting]:
+            from jobreach.errors import ScraperError
+
+            raise ScraperError("the site served a bot challenge")
+
+    def fake_build(names, **kwargs):
+        return [Working(), Broken()]
+
+    monkeypatch.setattr("jobreach.pipeline.build_scrapers", fake_build)
 
     with SQLiteJobRepository(":memory:") as repo:
-        result = asyncio.run(search(request(), repo))
-    assert "sources" in result["summary"]["errors"]
+        result = asyncio.run(search(request(sources=Sources.parse("wantedly,indeed")), repo))
+
+    assert result["summary"]["total"] == 1
+    assert [job["title"] for job in result["jobs"]] == ["UI Designer"]
+    assert "bot challenge" in result["summary"]["errors"]["indeed"]

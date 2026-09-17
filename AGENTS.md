@@ -20,11 +20,12 @@ instructions, and a failure only a human could interpret is a bug. The README's
 
 1. **`jobreach/` must stay standard-library only.** No third-party imports,
    ever. Hermes loads plugins inside its own runtime venv (Python 3.14), where
-   an extra binary dependency can break the agent. Playwright is the single
-   exception and it lives *outside* — see the next point.
+   an extra binary dependency can break the agent. Browsers are reached by
+   *running another interpreter*, never by importing one — see
+   `jobreach/scrapling.py` and `jobreach/drivers/`.
 2. **`tools.py` must not import the engine into Hermes' process.** Handlers
-   spawn `python -m jobreach` through `jobreach.runtime.run_engine`. This
-   keeps Playwright out of Hermes' venv and makes a 90-second scrape killable.
+   spawn `python -m jobreach` through `jobreach.runtime.run_engine`. This keeps
+   the browser stack out of Hermes' venv and makes a 90-second scrape killable.
 3. **`tools.py` / `__init__.py` / `schemas.py` use relative imports**
    (`from .jobreach.runtime import …`). Hermes' loader makes the plugin
    directory a package; a top-level `import jobreach` would only work by
@@ -56,17 +57,32 @@ the tool table in `SKILL.md`. The tests will tell you if you forget one.
 
 ## Adding a job board
 
-1. Add the member to `SourcePlatform` in `jobreach/domain.py`
-   (and to `PLATFORM_ALIASES` / `PLATFORM_LABELS`).
-2. Add its name to `_VALID_SOURCES` in `jobreach/config.py`.
-3. Write the scraper — `BaseScraper` for a JS-rendered board,
-   `CliScraper` for one already solved by an external CLI.
-4. Register it in `jobreach/scrapers/__init__.py`'s `SCRAPERS`.
-5. Document it in the coverage table in `skills/job-search/SKILL.md`.
+Two shapes, pick the cheaper one:
 
-Set `url_encodes_keyword = True` when the board filters server-side. That flag
-is what makes cross-language queries work: an English `engineer` search returns
-Japanese `エンジニア` titles, which a literal substring filter would reject.
+**A board with a JSON API** (Wantedly is the example). Subclass
+`BaseScraper`, read it with `jobreach.webclient`, set `needs_browser = False`
+so the CLI never demands a browser stack for a board that does not use one, and
+set `url_encodes_keyword = True` when the API filters server-side.
+
+**A board that renders with JavaScript or sits behind a challenge.** Build a
+*step list* (`jobreach.fetchers`: `wait`, `scroll`, `evaluate`, `click`,
+`wait_selector`, `capture`) and hand it to `BaseScraper.fetch` /
+`evaluate_page`. Never open a browser in the scraper: both backends
+(Scrapling in its own interpreter, Playwright in the plugin venv) execute the
+same vocabulary, and that is what keeps a board from working on one and
+silently breaking on the other. `click(..., optional=True)` is the idiom for
+"follow the pager while it exists".
+
+Either way, register it:
+
+1. add the member to `SourcePlatform` in `jobreach/domain.py`
+   (and to `PLATFORM_ALIASES` / `PLATFORM_LABELS`);
+2. add its name to `_VALID_SOURCES` in `jobreach/config.py`;
+3. register the class in `jobreach/scrapers/__init__.py`'s `SCRAPERS`;
+4. document it in the coverage table in `skills/job-search/SKILL.md`.
+
+Boards that cannot be scraped at all go into `INGEST_ONLY` (empty today — see
+the comment there for why Indeed left it).
 
 ## Verifying a change
 
@@ -85,10 +101,13 @@ echo '[{"title":"UI Designer","url":"https://jp.indeed.com/viewjob?jk=x"}]' \
   | python3 -m jobreach ingest --json
 ```
 
-Scraping additionally needs the venv: `python3 -m jobreach setup`
-(installs Playwright + Chromium, ~150 MB). Without it, browser boards fail with
-an actionable `MissingDependencyError` rather than an opaque crash — that
-behaviour is intentional and worth preserving.
+Scraping needs *a* browser backend, not a specific one. Check what is in play
+first — `python3 -m jobreach doctor` names it — then either use the Scrapling
+install the plugin found, or run `python3 -m jobreach setup` to build the
+Playwright fallback (~150 MB Chromium). Without either, browser boards fail
+with an actionable `MissingDependencyError` rather than an opaque crash, and
+Wantedly still works (it has no browser in its path at all). That behaviour is
+intentional and worth preserving.
 
 ## Style
 

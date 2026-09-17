@@ -285,7 +285,7 @@ def test_install_skill_writes_into_the_hermes_tree(
     assert path.parent.name == "job-reach"
     assert path.parent.parent.name == "productivity"
     assert path.read_text(encoding="utf-8").startswith("---")
-    assert (path.parent / "references" / "indeed-browser.md").exists()
+    assert (path.parent / "references" / "indeed.md").exists()
 
 
 def test_install_cron_reports_a_missing_hermes(
@@ -354,7 +354,7 @@ def test_skill_directory_contains_only_allowed_entries():
 def test_skill_references_resolve():
     body = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
     referenced = re.findall(r"references/([\w.-]+\.md)", body)
-    assert referenced, "the skill should point at its browser reference"
+    assert referenced, "the skill should point at its board references"
     for name in referenced:
         assert (SKILL_DIR / "references" / name).exists(), name
 

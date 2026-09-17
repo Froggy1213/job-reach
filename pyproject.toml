@@ -1,6 +1,6 @@
 [project]
 name = "job-reach-hermes"
-version = "2.0.0"
+version = "2.1.0"
 description = "Hermes Agent plugin: search Japanese job boards and track new listings"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -18,7 +18,13 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-# Needed only by the JS-rendered scrapers (Wantedly, Mynavi 2027).
+# Preferred browser backend: stealth fetching (Cloudflare solving) without
+# building a venv of our own. `job_setup` looks for an existing install first;
+# this extra is here for the case where you want one inside the plugin venv.
+scrapling = [
+    "scrapling[fetchers]>=0.4,<0.5",
+]
+# Fallback browser backend, used only when Scrapling is not available.
 # `job_setup` installs these into a dedicated venv; never into Hermes' venv.
 scrape = [
     "playwright>=1.50,<2.0",

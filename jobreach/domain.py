@@ -147,6 +147,9 @@ class JobPosting:
             "salary": self.salary,
             "is_new": self.is_new,
             "scraped_at": self.scraped_at.isoformat(),
+            #: When the board published the listing, if it said so. None is
+            #: common (LinkedIn and Mynavi do not expose it at all).
+            "posted_at": self.posted_at.isoformat() if self.posted_at else None,
         }
 
     @classmethod

@@ -25,12 +25,15 @@ _SEARCH = {
     "description": (
         "Search Japanese job boards live and return structured listings. "
         "Boards: 'wantedly' (general-purpose, honours keyword + location — use "
-        "this for any free-text or non-design search), 'mynavi2027' (new-graduate "
-        "design roles only; ignores location), 'linkedin' (via the OpenCLI Chrome "
-        "bridge; needs Chrome running). With no keyword it runs the built-in "
-        "design-in-Tokyo feed. Listings are deduplicated against the local "
-        "database and flagged 'is_new' when this run is the first to see them. "
-        "A live scrape takes 30-90 seconds — do not retry in a loop."
+        "this for any free-text or non-design search; read over Wantedly's own "
+        "JSON API, so it is fast and needs no browser), 'indeed' (all of Japan's "
+        "market, honours keyword + location; drives a stealth browser and takes "
+        "~30 seconds), 'mynavi2027' (new-graduate design roles only; ignores "
+        "location), 'linkedin' (via the OpenCLI Chrome bridge; needs Chrome "
+        "running). With no keyword it runs the built-in design-in-Tokyo feed. "
+        "Listings are deduplicated against the local database and flagged "
+        "'is_new' when this run is the first to see them. A live scrape takes "
+        "5-90 seconds depending on the boards — do not retry in a loop."
     ),
     "parameters": {
         "type": "object",
@@ -46,16 +49,18 @@ _SEARCH = {
             "location": {
                 "type": "string",
                 "description": (
-                    "Wantedly location slug, e.g. 'tokyo' or 'osaka'. Use 'any' "
-                    "to search nationwide. Default: 'tokyo'."
+                    "Location: a Wantedly/Indeed slug ('tokyo', 'osaka'), a "
+                    "Japanese place name ('大阪'), or 'any' for nationwide. "
+                    "Mynavi ignores it. Default: 'tokyo'."
                 ),
             },
             "sources": {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": (
-                    "Boards to search. Default: ['wantedly','mynavi2027','linkedin']. "
-                    "'indeed' is rejected here — use job_ingest for Indeed Japan."
+                    "Boards to search: 'wantedly', 'indeed', 'mynavi2027', "
+                    "'linkedin'. Default: ['wantedly','mynavi2027','linkedin']. "
+                    "Add 'indeed' explicitly for the widest coverage."
                 ),
             },
             "limit": {
@@ -103,12 +108,11 @@ _INGEST = {
     "name": "job_ingest",
     "description": (
         "Feed listings you fetched yourself into the same dedupe/persist/'new' "
-        "pipeline the scrapers use. This is the ONLY way Indeed Japan listings "
-        "enter the database: Cloudflare blocks headless scraping, but a real "
-        "browser passes, so fetch the cards with your browser tool, extract "
-        "title + url (plus company/location/salary if present), and pass them "
-        "here. Every listing with a URL already stored comes back with "
-        "is_new=false, so re-running is safe."
+        "pipeline the scrapers use. This is the **fallback path**: use it when a "
+        "board's scraper could not run — a Cloudflare challenge that the stealth "
+        "browser lost, a board the plugin does not know, or listings a browser "
+        "tool (or the Scrapling MCP server) already returned. Every listing with "
+        "a URL already stored comes back with is_new=false, so re-running is safe."
     ),
     "parameters": {
         "type": "object",
@@ -209,9 +213,10 @@ _STATUS = {
     "description": (
         "Report the state of Job Reach: how many listings are stored (by "
         "board), when the last run happened and what it found, plus runtime "
-        "readiness — which boards can actually run, which interpreter is used, "
-        "whether the scraping venv and the Obsidian vault were found. Call this "
-        "first when a search fails or before setting up monitoring."
+        "readiness — which browser backend is in use, which interpreter runs "
+        "the engine, which boards can actually run, and whether the Obsidian "
+        "vault was found. Call this first when a search fails or before "
+        "setting up monitoring."
     ),
     "parameters": {
         "type": "object",
@@ -228,22 +233,27 @@ _STATUS = {
 _SETUP = {
     "name": "job_setup",
     "description": (
-        "One-time preparation of the scraping runtime: creates the plugin venv, "
-        "installs Playwright plus its Chromium build, and installs the skill "
-        "into Hermes' skills directory so it can auto-trigger. Run this once "
-        "after installing the plugin, or whenever job_status reports that "
-        "Wantedly/Mynavi are not ready. Takes a few minutes (Chromium is ~150MB)."
+        "One-time preparation of the scraping runtime, and it prefers to do "
+        "nothing: if Scrapling is already installed (very likely — it is the "
+        "plugin author's backend and other MCP servers use it too) that install "
+        "is adopted as-is and no download happens. Only when Scrapling is absent "
+        "does this create the plugin venv, install Playwright plus its Chromium "
+        "build (~150 MB), and install the skill into Hermes' skills directory. "
+        "Takes minutes in the fallback case, seconds otherwise."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "with_browser": {
                 "type": "boolean",
-                "description": "Also download Chromium (default true).",
+                "description": (
+                    "Download Chromium in the fallback path (default true; "
+                    "ignored when Scrapling is used)."
+                ),
             },
             "force": {
                 "type": "boolean",
-                "description": "Recreate the venv from scratch (default false).",
+                "description": "Recreate the plugin venv from scratch (default false).",
             },
             "install_skill": {
                 "type": "boolean",

@@ -24,8 +24,9 @@ at every layer:
 - **The interface is read by a model, not typed by a person.** Each tool schema
   has to carry the knowledge needed to choose correctly: which board answers
   which query, that Mynavi is new-grad design only and ignores location, that
-  Indeed Japan is ingest-only, that a scrape takes 30–90 seconds and must not be
-  retried in a loop. That prose is the product, not decoration.
+  Indeed is the widest market but the only board that can be bot-blocked, that a
+  scrape takes seconds to a minute and must not be retried in a loop. That prose
+  is the product, not decoration.
 - **Output is a contract.** Every tool returns a stable JSON envelope
   (`summary`, `jobs[]`, `is_new`); `--json` writes nothing but JSON to stdout
   while logs go to stderr; `is_new` makes "what changed?" a field instead of a
@@ -36,8 +37,8 @@ at every layer:
   Handlers never raise — a stack trace is useless to a model.
 - **The tool may not break its host.** The engine imports nothing outside the
   standard library, so it loads cleanly into Hermes' own runtime (Python 3.14)
-  and can never take down the agent it serves. Playwright, the one heavy
-  dependency, lives in a separate venv and is driven over a subprocess.
+  and can never take down the agent it serves. Browsers — the one heavy
+  dependency — live outside, in an interpreter the plugin only *drives*.
 - **Knowledge lives in the repository, not in someone's head.** A skill whose
   `description` is its trigger, plus `references/` for procedures too long for a
   tool description — the Indeed browser recipe, the board-by-board caveats.
@@ -68,14 +69,42 @@ ask for rather than something you perform.
 
 ---
 
+## What changed in 2.1
+
+Three upgrades, all driven by capabilities that appeared after 2.0 was written:
+
+1. **Wantedly is read over its JSON API.** The HTML search page turns out to
+   *discard* query parameters it no longer recognises and redirect to the
+   generic feed — so a keyword search through the page silently returned
+   unrelated listings, and because the old scraper declared
+   `url_encodes_keyword = True`, the client-side filter did not catch them
+   either. `/api/v1/projects` honours `q=` for real, returns typed fields
+   (company, address, description, publication date) and costs ~4 s instead of
+   ~40 s. This board now needs **no browser at all** (`needs_browser = False`).
+2. **Indeed Japan is scraped.** It was ingest-only because Cloudflare refused
+   headless clients; a stealth browser (Scrapling's patched Chromium) gets
+   through — measured 200 OK, 16 cards, ~7 s, headless, repeatable. The
+   `job_ingest` workflow stays as the documented fallback for blocked runs.
+3. **Fetching is a backend choice, not a dependency.** Scrapers describe their
+   page work as a *step list* (`wait`, `scroll`, `evaluate`, `click`, …) and the
+   plugin runs it on whichever backend exists: Scrapling (preferred — usually
+   already installed, solves Cloudflare, downloads nothing) or the plugin's own
+   Playwright venv (the 150 MB fallback). `job_setup` now adopts Scrapling when
+   it finds it.
+
+Also: `posted_at` is carried through the store and the JSON envelope, and
+`doctor` reports the backend board by board.
+
+---
+
 ## What it does
 
 | Board | Keyword search | Location | How it is fetched |
 |-------|----------------|----------|-------------------|
-| **Wantedly** | ✅ server-side | ✅ slug (`tokyo`, `osaka`, `any`) | Playwright |
-| **Mynavi 2027** | ⚠️ best-effort | ❌ ignored | Playwright, by occupation code |
+| **Wantedly** | ✅ server-side | ✅ slug (`tokyo`, `osaka`, `any`) | **JSON API over HTTP** — no browser, ~4 s |
+| **Indeed Japan** | ✅ server-side | ✅ slug or place name (`大阪`) | **Stealth browser (Scrapling)** — ~30 s |
+| **Mynavi 2027** | ⚠️ best-effort | ❌ ignored | Stealth/Playwright browser, by occupation code |
 | **LinkedIn** | ✅ server-side | ✅ | `opencli` CLI (your logged-in Chrome) |
-| **Indeed Japan** | n/a | n/a | **No scraper** — the agent fetches with a real browser and feeds it in |
 
 Every listing is keyed by its normalised URL in a local SQLite store, so each
 run reports genuine changes instead of the same cards again.
@@ -86,8 +115,8 @@ run reports genuine changes instead of the same cards again.
 
 ```bash
 hermes plugins install Froggy1213/job-reach --enable
-hermes job-reach setup          # one-time: venv + Playwright + Chromium (~150 MB)
-hermes job-reach doctor         # verify
+hermes job-reach setup          # adopts Scrapling if present; else venv + Chromium
+hermes job-reach doctor         # verify: backend, boards, interpreter
 ```
 
 `setup` also copies the bundled skill into `~/.hermes/skills/productivity/job-reach/`
@@ -112,11 +141,11 @@ hermes job-reach search --keyword "frontend engineer" --source wantedly -n 10
 | Tool | Purpose |
 |------|---------|
 | `job_search` | Live scrape of the selected boards; returns a structured envelope. |
-| `job_ingest` | **The only way Indeed Japan listings enter the store.** |
+| `job_ingest` | Fallback: listings you fetched by hand enter the same pipeline. |
 | `job_list` | Read what is already stored — no network. |
 | `job_note` | Render a result into an Obsidian Markdown note. |
-| `job_status` | Store counts, last run, and which boards can actually run. |
-| `job_setup` | One-time runtime install (venv, Chromium, skill). |
+| `job_status` | Store counts, last run, active backend, board readiness. |
+| `job_setup` | One-time runtime install (adopts Scrapling, or builds Playwright). |
 | `job_cron` | Schedule recurring monitoring through `hermes cron`. |
 
 Plus a `/jobs <keyword>` slash command and a `hermes job-reach …` CLI that
@@ -134,6 +163,11 @@ tools.py                     thin async handlers; spawn the engine, return JSON
 skills/job-search/           SKILL.md + references/ (the agent's playbook)
 jobreach/                   the engine — standard library only
 ├── domain.py                SourcePlatform, JobPosting (frozen dataclass)
+├── webclient.py             stdlib HTTP for boards with a JSON API
+├── fetchers.py              the step vocabulary + backend selection
+├── scrapling.py             locate and drive a Scrapling install
+├── drivers/                 scripts executed by another interpreter
+│   └── scrapling_driver.py  fetches one page with Scrapling (JSON in/out)
 ├── store.py                 JobRepository port + SQLite adapter
 ├── filters.py               relevance profiles (regex heuristics / LLM)
 ├── scrapers/                one strategy per board
@@ -150,15 +184,17 @@ jobreach/                   the engine — standard library only
 outside the stdlib — no SQLAlchemy, no aiosqlite, no pydantic, no httpx. Hermes
 runs plugins inside its own runtime venv (Python 3.14 today), and an engine that
 needs binary wheels there is an engine that can break the agent. SQLite comes
-from `sqlite3`, validation is explicit dataclass checks, and the optional LLM
-filter uses `urllib.request`.
+from `sqlite3`, validation is explicit dataclass checks, HTTP comes from
+`urllib.request`, and the optional LLM filter uses the same.
 
-**2. Tools run the engine in a subprocess, not in-process.** Scraping needs
-Playwright, which must never be installed into Hermes' own venv; and a scrape
-takes 30–90 seconds and several hundred MB of Chromium. A killable child
-process is easier to reason about than a blocked agent. The interpreter is
-resolved as `$JOBREACH_PYTHON` → the plugin venv → `sys.executable`, so the
-read-only tools work even before `setup` has run.
+**2. A browser is a capability we look for, never a dependency we declare.**
+Scrapers describe their page work as a step list (`wait`, `scroll`, `evaluate`,
+`click`, `wait_selector`, `capture`) and hand it to a backend: Scrapling, run as
+a subprocess in whatever interpreter has it, or Playwright inside the plugin's
+own venv. Both execute the same vocabulary, so a board cannot work on one and
+silently break on the other. The interpreter is resolved as
+`$JOBREACH_PYTHON` → the plugin venv → `sys.executable`, so the read-only tools
+work before any setup has run.
 
 **3. Messaging and scheduling belong to Hermes.** `job_cron` creates a real
 `hermes cron` job in **monitor mode**: the boards are polled cheaply every tick
@@ -187,6 +223,8 @@ Everything is optional; see `.env.example`.
 | `JOBREACH_HOME` | Data directory. Default `$HERMES_HOME/plugin-data/job-reach`. |
 | `JOBREACH_DB` | Explicit database path. |
 | `JOBREACH_PYTHON` | Interpreter used to run the engine. |
+| `JOBREACH_BACKEND` | `auto` (default), `scrapling` or `playwright` — pin one backend for debugging. |
+| `JOBREACH_SCRAPLING_PYTHON` | Interpreter that has Scrapling, when auto-detection misses it. |
 | `OBSIDIAN_VAULT_PATH` | Vault for generated notes (auto-detected otherwise). |
 | `JOBREACH_LLM_API_KEY` | Generic key for `validation="llm"`. Requires `JOBREACH_LLM_BASE_URL`. |
 | `JOBREACH_LLM_BASE_URL` | OpenAI-compatible endpoint for `validation="llm"`. |
@@ -250,13 +288,13 @@ over unchanged in substance:
 
 - the **strategy pattern** for boards — one class per site, one registry entry;
 - the **repository port** — the pipeline never sees SQL;
-- the **Playwright scrapers**, including every markup workaround and the comment
-  explaining why it exists (the company link being a sibling of the project
-  link, Mynavi's card text carrying the actual role);
+- the **hard-won board knowledge**, now encoded in selectors, URL schemes and
+  comments rather than in prose: Wantedly's real search API, Indeed's `jk` keys
+  and `[data-testid]` slots, Mynavi's occupation codes and card text;
 - the **local/LLM relevance profiles**, and the rule that a failing LLM batch
   degrades to heuristics instead of losing a scrape;
-- the **Indeed browser-ingest workflow** — the one board where the honest answer
-  is "a real browser or nothing".
+- the **browser-ingest fallback** for Indeed — the one board where the honest
+  answer, when automation is blocked, is still "a real browser or nothing".
 
 ---
 

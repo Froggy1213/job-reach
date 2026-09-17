@@ -7,6 +7,14 @@ can only best-effort-filter an arbitrary keyword, which is why the relevance
 check runs against the whole card text rather than the visible title.
 
 For any general or mid-career search, use Wantedly instead.
+
+Implementation note: this board renders its results with JavaScript, so it needs
+a browser — but not *this* process's browser. The page work is expressed as a
+step list and handed to :meth:`BaseScraper.fetch`, which runs it either on
+Scrapling (in its own interpreter) or on the plugin's Playwright venv. The
+pagination step is what makes the vocabulary worth having: ``click`` with
+``optional=True`` *is* "follow the pager while it exists", and it reads the same
+on either backend.
 """
 
 from __future__ import annotations
@@ -15,6 +23,7 @@ from typing import Any
 
 from ..domain import JobPosting, SourcePlatform
 from ..errors import ScraperError
+from ..fetchers import click, evaluate, scroll, wait, wait_load, wait_selector
 from ..logging_setup import get_logger
 from .base import BaseScraper
 
@@ -89,17 +98,15 @@ class Mynavi2027Scraper(BaseScraper):
         seen_urls: set[str] = set()
         failures: list[str] = []
 
-        async with self.browser_page() as page:
-            for code, label in OCCUPATIONS.items():
-                url = f"{BASE_URL}/27/pc/search/occ{code}.html"
-                try:
-                    jobs.extend(await self._scrape_occupation(page, code, label, url, seen_urls))
-                except Exception as exc:  # noqa: BLE001 — one category must not kill the run
-                    logger.warning(
-                        "Mynavi occupation failed",
-                        extra={"occupation": code, "error": str(exc)},
-                    )
-                    failures.append(code)
+        for code, label in OCCUPATIONS.items():
+            try:
+                jobs.extend(await self._scrape_occupation(code, label, seen_urls))
+            except Exception as exc:  # noqa: BLE001 — one category must not kill the run
+                logger.warning(
+                    "Mynavi occupation failed",
+                    extra={"occupation": code, "error": str(exc)},
+                )
+                failures.append(code)
 
         if failures and len(failures) == len(OCCUPATIONS):
             raise ScraperError(
@@ -110,38 +117,36 @@ class Mynavi2027Scraper(BaseScraper):
         return jobs
 
     async def _scrape_occupation(
-        self,
-        page: Any,
-        code: str,
-        label: str,
-        url: str,
-        seen_urls: set[str],
+        self, code: str, label: str, seen_urls: set[str]
     ) -> list[JobPosting]:
         """Scrape one occupation code, following the pager while it exists."""
-        found: list[JobPosting] = []
-
-        await self.goto(page, url)
-        await self._wait_for_cards(page)
-        found.extend(self._parse_cards(await page.evaluate(_CARD_SCRIPT), label, seen_urls))
-
+        url = f"{BASE_URL}/27/pc/search/occ{code}.html"
+        steps: list[dict[str, Any]] = [
+            scroll(800, times=2, settle_ms=RENDER_SETTLE_MS),
+            evaluate(_CARD_SCRIPT, "page1"),
+        ]
         for page_number in range(2, MAX_PAGES_PER_OCCUPATION + 1):
-            pager = page.locator(f'ul.pagingLink a:has-text("{page_number}")')
-            if await pager.count() == 0:
-                break
-            await pager.first.click()
-            await page.wait_for_load_state("domcontentloaded", timeout=self.timeout_ms)
-            await self._wait_for_cards(page)
+            steps += [
+                # Optional: on the last page there is simply no such link, and
+                # that is not an error.
+                click(f'ul.pagingLink a:has-text("{page_number}")', optional=True, settle_ms=800),
+                wait_load("domcontentloaded"),
+                wait_selector(CARD_SELECTOR, timeout_ms=CARD_WAIT_MS),
+                wait(RENDER_SETTLE_MS),
+                evaluate(_CARD_SCRIPT, f"page{page_number}"),
+            ]
 
-            page_jobs = self._parse_cards(await page.evaluate(_CARD_SCRIPT), label, seen_urls)
-            if not page_jobs:
-                break
-            found.extend(page_jobs)
+        result = await self.fetch(
+            url, steps=steps, wait_selector=CARD_SELECTOR, timeout_ms=max(self.timeout_ms, 45_000)
+        )
 
+        found: list[JobPosting] = []
+        for key in ("page1", *(f"page{n}" for n in range(2, MAX_PAGES_PER_OCCUPATION + 1))):
+            cards = result.get(key)
+            if not isinstance(cards, list):
+                continue
+            found.extend(self._parse_cards(cards, label, seen_urls))
         return found
-
-    async def _wait_for_cards(self, page: Any) -> None:
-        await page.wait_for_selector(CARD_SELECTOR, state="attached", timeout=CARD_WAIT_MS)
-        await page.wait_for_timeout(RENDER_SETTLE_MS)
 
     def _parse_cards(
         self, raw_items: list[dict[str, Any]], label: str, seen_urls: set[str]
@@ -163,6 +168,7 @@ class Mynavi2027Scraper(BaseScraper):
                         url=url,
                         location=str(item.get("location") or "Japan"),
                         source_platform=self.platform,
+                        description=str(item["cardText"]).strip() if item.get("cardText") else None,
                     )
                 )
             except Exception:  # noqa: BLE001 — malformed card, keep going

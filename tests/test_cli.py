@@ -34,14 +34,33 @@ def run(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str, str]:
     return code, captured.out, captured.err
 
 
-def test_doctor_json_reports_paths(data_home: Path, capsys: pytest.CaptureFixture[str]):
+def test_doctor_json_reports_paths_and_backend(
+    data_home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+):
+    """``doctor`` is the first thing an agent calls when a search fails.
+
+    The backends are stubbed to "nothing installed" so the assertions describe
+    the *contract* — a board's readiness follows from what it needs, not from
+    what happens to be installed on the machine running the tests.
+    """
+    monkeypatch.setattr("jobreach.scrapling.scrapling_python", lambda: (None, ""))
+    monkeypatch.setattr("jobreach.scrapers.base.probe_playwright", lambda: (False, "no playwright"))
+
     code, out, _ = run(capsys, "doctor", "--json")
     assert code == EXIT_OK
     payload = json.loads(out)
     assert payload["plugin_version"]
     assert payload["data_dir"] == str(data_home)
-    assert "indeed" in payload["boards"]
-    assert payload["boards"]["indeed"]["ready"] is True
+    assert payload["backend"]["selected"] is None
+    assert "job-reach setup" in payload["backend"]["hint"]
+
+    boards = payload["boards"]
+    assert set(boards) == {"wantedly", "mynavi2027", "linkedin", "indeed"}
+    # Board readiness follows from what each board needs.
+    assert boards["wantedly"]["needs_browser"] is False
+    assert boards["wantedly"]["ready"] is True  # JSON over HTTP needs nothing
+    assert boards["indeed"]["needs_browser"] is True
+    assert boards["indeed"]["ready"] is False  # …and there is no browser here
 
 
 def test_stats_on_an_empty_database(data_home: Path, capsys: pytest.CaptureFixture[str]):
@@ -119,10 +138,40 @@ def test_note_requires_an_envelope(
 def test_setup_without_uv_fails_with_a_hint(
     data_home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ):
+    """With no Scrapling, setup falls back to the Playwright venv — and needs uv."""
+    monkeypatch.setattr(
+        "jobreach.runtime.scrapling_status",
+        lambda: {"ready": False, "python": None, "source": "", "version": "", "problem": ""},
+    )
     monkeypatch.setattr("jobreach.runtime.uv_path", lambda: None)
     code, out, _ = run(capsys, "setup", "--no-browser")
     assert code == EXIT_FAILURE
     assert "uv was not found" in out
+
+
+def test_setup_uses_scrapling_when_it_is_installed(
+    data_home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+):
+    """The whole point of the Scrapling backend: setup downloads nothing."""
+    monkeypatch.setattr(
+        "jobreach.runtime.scrapling_status",
+        lambda: {
+            "ready": True,
+            "python": "/opt/scrapling/bin/python",
+            "source": "test",
+            "version": "0.4.15",
+            "problem": "",
+        },
+    )
+    monkeypatch.setattr("jobreach.runtime.uv_path", lambda: None)  # would fail if reached
+    monkeypatch.setattr("jobreach.runtime.smoke_test", lambda: (True, "{}"))
+
+    code, out, _ = run(capsys, "setup", "--json")
+    assert code == EXIT_OK
+    payload = json.loads(out)
+    assert payload["backend"] == "scrapling"
+    assert payload["ok"] is True
+    assert all(step["ok"] for step in payload["steps"])
 
 
 def test_install_skill_writes_into_a_fake_hermes_home(

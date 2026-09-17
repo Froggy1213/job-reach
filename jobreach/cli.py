@@ -410,7 +410,15 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     print(f"  database       {payload['database']}"
           f"{'' if payload['database_exists'] else '  (not created yet)'}")
     print(f"  interpreter    {payload['engine_interpreter']}  [{payload['engine_interpreter_source']}]")
-    print(f"  browser        {'ready' if payload['browser_ready'] else 'NOT installed'}")
+    backend = payload.get("backend") or {}
+    selected = backend.get("selected") or {}
+    if selected:
+        print(f"  browser        {selected.get('name')} — {selected.get('detail')}")
+    else:
+        print(f"  browser        NONE selected — {backend.get('problem') or 'not installed'}")
+        for line in str(backend.get("hint") or "").splitlines():
+            print(f"                 {line}")
+    print(f"  scrapling      {backend.get('scrapling', {}).get('version') or 'not found'}")
     print(f"  venv           {payload['venv'] or '— (run `jobreach setup`)'}")
     print(f"  uv             {payload['uv'] or '— not found'}")
     print(f"  obsidian vault {payload['obsidian_vault'] or '— not found'}")
@@ -419,11 +427,11 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         mark = "ok  " if info["ready"] else "FAIL"
         note = info.get("note") or info.get("problem") or ""
         head, *rest = str(note).splitlines() or [""]
-        print(f"    [{mark}] {board:<11} {head}")
+        print(f"    [{mark}] {board:<11} {info.get('backend', ''):<12} {head}")
         # Continuation lines carry the actionable hint, indented so they read
         # as belonging to the board above them.
         for line in rest:
-            print(f"         {' ' * 11} {line}")
+            print(f"         {' ' * 23} {line}")
     return EXIT_OK
 
 

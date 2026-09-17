@@ -1,9 +1,9 @@
 name: job-reach
-version: "2.0.0"
+version: "2.1.0"
 description: >-
-  Search Japanese job boards (Wantedly, Mynavi 2027, LinkedIn) and track which
-  listings are new since the last run. Ships LLM-callable tools for searching,
-  ingesting browser-fetched Indeed Japan listings, writing Obsidian notes, and
+  Search Japanese job boards (Wantedly, Indeed, Mynavi 2027, LinkedIn) and track
+  which listings are new since the last run. Ships LLM-callable tools for
+  searching, ingesting hand-fetched listings, writing Obsidian notes, and
   scheduling recurring monitoring through hermes cron.
 author: Froggy1213
 license: MIT
@@ -25,11 +25,15 @@ tags:
 requires_env: []
 optional_env:
   - name: JOBREACH_HOME
-    description: "Data directory (database + scraping venv). Default: $HERMES_HOME/plugin-data/job-reach"
+    description: "Data directory (database + optional scraping venv). Default: $HERMES_HOME/plugin-data/job-reach"
   - name: JOBREACH_DB
     description: "Explicit path to the SQLite database file."
   - name: JOBREACH_PYTHON
     description: "Interpreter used to run the engine. Point this at a Python with playwright installed if you manage the venv yourself."
+  - name: JOBREACH_BACKEND
+    description: "Browser backend: 'auto' (default), 'scrapling' or 'playwright'. Pinning it is how you debug one against the other."
+  - name: JOBREACH_SCRAPLING_PYTHON
+    description: "Interpreter that has Scrapling installed (the preferred backend). Auto-detected from a `scrapling` binary on PATH, the plugin venv, and known local installs."
   - name: JOBREACH_UV
     description: "Path to the uv binary used by `job_setup` to create the scraping venv."
   - name: OBSIDIAN_VAULT_PATH
@@ -46,8 +50,11 @@ optional_env:
     description: "OpenAI key for LLM filtering; implies api.openai.com and gpt-4o-mini."
 
 external_dependencies:
+  - name: scrapling
+    description: "Preferred browser backend — a stealth browser that solves Cloudflare challenges (https://github.com/D4Vinci/Scrapling). Auto-detected; when present, `job_setup` downloads nothing."
+    optional: true
   - name: uv
-    description: "Used once by `job_setup` to create the scraping venv (https://astral.sh/uv). Hermes already bundles a copy."
+    description: "Used once by `job_setup` to create the Playwright fallback venv (https://astral.sh/uv). Hermes already bundles a copy."
     optional: true
   - name: opencli
     description: "Required only for the LinkedIn board; drives the user's Chrome session with the OpenCLI extension."

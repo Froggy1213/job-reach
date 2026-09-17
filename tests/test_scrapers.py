@@ -1,23 +1,30 @@
-"""Scraper strategies: URL construction, relevance matching, CLI plumbing.
+"""Scraper strategies: URL construction, relevance matching, parsing, plumbing.
 
-Nothing here launches a browser — the parsers are fed synthetic card payloads,
-which is precisely why they were written as separate methods.
+Nothing here launches a browser or hits the network — pages and API payloads are
+fed in as data, which is precisely why the parsers were written as separate
+methods. The fetch layer itself is covered by ``test_fetchers.py``.
 """
 
 from __future__ import annotations
+
+import asyncio
 
 import pytest
 
 from jobreach.domain import SourcePlatform
 from jobreach.errors import MissingDependencyError, ScraperError
+from jobreach.fetchers import FetchResult
 from jobreach.scrapers import (
     SCRAPERS,
     available_sources,
     build_scrapers,
     check_source_requirements,
     is_cli_scraper,
+    needs_browser,
+    scraper_for,
 )
 from jobreach.scrapers.cli_base import _records_from
+from jobreach.scrapers.indeed import LOCATION_SLUGS, IndeedScraper
 from jobreach.scrapers.linkedin import LinkedInScraper
 from jobreach.scrapers.mynavi2027 import Mynavi2027Scraper
 from jobreach.scrapers.wantedly import WantedlyScraper
@@ -25,19 +32,10 @@ from jobreach.scrapers.wantedly import WantedlyScraper
 # --- registry --------------------------------------------------------------
 
 
-def test_registry_lists_scrapers_and_ingest_only_boards():
+def test_every_board_has_a_scraper():
+    """Indeed used to be ingest-only; the stealth browser graduated it."""
     assert set(available_sources()) == {"wantedly", "mynavi2027", "linkedin", "indeed"}
-    assert "indeed" not in SCRAPERS
-
-
-def test_build_scrapers_rejects_indeed_with_guidance():
-    with pytest.raises(ValueError, match="job_ingest"):
-        build_scrapers(["indeed"])
-
-
-def test_build_scrapers_rejects_unknown_names():
-    with pytest.raises(ValueError, match="unknown source"):
-        build_scrapers(["monster"])
+    assert set(SCRAPERS) == set(available_sources())
 
 
 def test_build_scrapers_passes_the_query_through():
@@ -46,48 +44,75 @@ def test_build_scrapers_passes_the_query_through():
     assert scraper.location == "osaka"
 
 
+def test_build_scrapers_instantiates_indeed():
+    (scraper,) = build_scrapers(["indeed"], keyword="デザイナー")
+    assert isinstance(scraper, IndeedScraper)
+    assert scraper.platform is SourcePlatform.INDEED
+
+
+def test_build_scrapers_rejects_unknown_names():
+    with pytest.raises(ValueError, match="unknown source"):
+        build_scrapers(["monster"])
+
+
+def test_scraper_for_returns_none_for_unknown_boards():
+    assert scraper_for("monster") is None
+    assert scraper_for("indeed") is IndeedScraper
+
+
 def test_linkedin_is_the_only_cli_board():
     assert is_cli_scraper("linkedin")
     assert not is_cli_scraper("wantedly")
 
 
-def test_requirements_report_missing_playwright(monkeypatch: pytest.MonkeyPatch):
-    """Without the scraping extra, browser boards report a problem — not a crash.
+# --- browser requirements --------------------------------------------------
+
+
+def test_only_browser_boards_are_probed(monkeypatch: pytest.MonkeyPatch):
+    """Wantedly is HTTP and LinkedIn is a CLI: neither may need a browser."""
+
+    def _explode():  # pragma: no cover - would fail the test if called
+        raise AssertionError("a board without a browser must not trigger a probe")
+
+    monkeypatch.setattr("jobreach.scrapers.base.probe_browser_stack", _explode)
+    assert check_source_requirements(["wantedly", "linkedin"]) == {}
+
+
+def test_requirements_report_a_missing_browser_for_every_browser_board(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Without any backend, browser boards report the fix — not a crash.
 
     The probe is patched at its **definition site** (``scrapers.base``), which is
     the only place it is looked up: ``check_source_requirements`` calls it
     through the module precisely so that seam exists. Patching a name imported
     into ``scrapers/__init__`` would silently do nothing, and this test would
-    then only pass on machines where playwright happens to be absent.
+    then only pass on machines that happen to lack a browser.
     """
 
     def _missing():
-        raise MissingDependencyError("no playwright here", hint="run setup")
+        raise MissingDependencyError("no browser backend here", hint="run setup")
 
-    monkeypatch.setattr("jobreach.scrapers.base.require_playwright", _missing)
-    problems = check_source_requirements(["wantedly", "mynavi2027", "linkedin"])
-    assert set(problems) == {"wantedly", "mynavi2027"}
-    assert "run setup" in problems["wantedly"]
+    monkeypatch.setattr("jobreach.scrapers.base.probe_browser_stack", _missing)
+    problems = check_source_requirements(["wantedly", "mynavi2027", "linkedin", "indeed"])
+    assert set(problems) == {"mynavi2027", "indeed"}
+    assert "run setup" in problems["indeed"]
 
 
-def test_requirements_are_clean_when_the_browser_stack_is_present(
-    monkeypatch: pytest.MonkeyPatch,
-):
+def test_requirements_are_clean_when_a_backend_exists(monkeypatch: pytest.MonkeyPatch):
     """The mirror case, so the test above cannot pass for the wrong reason."""
     monkeypatch.setattr(
-        "jobreach.scrapers.base.require_playwright", lambda: (object(), object())
+        "jobreach.scrapers.base.probe_browser_stack", lambda: ("scrapling", "Scrapling 0.4")
     )
-    assert check_source_requirements(["wantedly", "mynavi2027", "linkedin"]) == {}
+    assert check_source_requirements(["wantedly", "mynavi2027", "linkedin", "indeed"]) == {}
 
 
-def test_requirements_skip_cli_boards_entirely(monkeypatch: pytest.MonkeyPatch):
-    """LinkedIn needs no browser, so it must never be probed for one."""
-
-    def _explode():  # pragma: no cover - would fail the test if called
-        raise AssertionError("CLI boards must not trigger a Playwright probe")
-
-    monkeypatch.setattr("jobreach.scrapers.base.require_playwright", _explode)
-    assert check_source_requirements(["linkedin"]) == {}
+def test_needs_browser_matches_the_implementation():
+    assert needs_browser("indeed") is True
+    assert needs_browser("mynavi2027") is True
+    assert needs_browser("wantedly") is False
+    assert needs_browser("linkedin") is False  # CLI-driven, not a browser
+    assert needs_browser("monster") is False
 
 
 # --- relevance matching ----------------------------------------------------
@@ -110,8 +135,8 @@ def test_default_design_filter(title: str, expected: bool):
 
 def test_server_side_keyword_boards_trust_the_query():
     """A cross-language query returns titles a substring match would reject."""
-    scraper = WantedlyScraper(keyword="engineer")
-    assert scraper.matches("バックエンドエンジニア募集") is True
+    assert WantedlyScraper(keyword="engineer").matches("バックエンドエンジニア募集") is True
+    assert IndeedScraper(keyword="designer").matches("【アートディレクター】") is True
 
 
 def test_client_side_keyword_boards_filter_on_tokens():
@@ -130,72 +155,246 @@ def test_an_english_keyword_cannot_match_a_purely_japanese_card():
     assert Mynavi2027Scraper(keyword="design").matches("Acme | Webデザイン職") is False
 
 
-# --- Wantedly --------------------------------------------------------------
+# --- Wantedly (JSON API) ---------------------------------------------------
 
 
-def test_wantedly_url_encodes_keyword_and_location():
-    url = WantedlyScraper(keyword="frontend engineer", location="osaka").build_page_url(2)
-    assert url.startswith("https://www.wantedly.com/projects?")
+def project(project_id: int = 2436572, **overrides) -> dict:
+    record = {
+        "id": project_id,
+        "title": "UI Designer 募集",
+        "company": {"id": 1, "name": "株式会社テスト"},
+        "location": "東京都渋谷区道玄坂１丁目",
+        "location_suffix": "渋谷ビル 5階",
+        "description": "■仕事内容\nプロダクトのUI設計",
+        "published_at": "2026-03-11T17:42:31.063+09:00",
+    }
+    record.update(overrides)
+    return record
+
+
+def test_wantedly_api_url_carries_keyword_area_and_page():
+    url = WantedlyScraper(keyword="frontend engineer", location="osaka").build_api_url(2)
+    assert url.startswith("https://www.wantedly.com/api/v1/projects?")
     assert "q=frontend+engineer" in url
-    assert "locations=osaka" in url
+    assert "areas=osaka" in url
     assert "page=2" in url
 
 
-def test_wantedly_default_url_uses_design_occupations():
-    url = WantedlyScraper().build_page_url(1)
-    assert "occupations=" in url
-    assert "locations=tokyo" in url
+@pytest.mark.parametrize("sentinel", ["any", "all", "Japan"])
+def test_wantedly_location_sentinel_disables_the_area_filter(sentinel: str):
+    assert "areas=" not in WantedlyScraper(location=sentinel).build_api_url(1)
 
 
-@pytest.mark.parametrize("sentinel", ["any", "all"])
-def test_wantedly_location_sentinel_disables_the_filter(sentinel: str):
-    assert "locations=" not in WantedlyScraper(location=sentinel).build_page_url(1)
-
-
-def test_wantedly_parses_cards_and_drops_malformed_ones():
+def test_wantedly_needs_no_browser_at_all():
+    """The point of the API rewrite: no Chromium, no venv, no Playwright."""
     scraper = WantedlyScraper()
-    jobs = scraper._parse_cards(
+    assert scraper.needs_browser is False
+    assert scraper.fetch_modes  # inherited, but never reached for this board
+
+
+def test_wantedly_parses_projects_into_postings():
+    (job,) = WantedlyScraper()._parse_projects([project()])
+    assert job.url == "https://www.wantedly.com/projects/2436572"
+    assert job.company == "株式会社テスト"
+    assert job.source_platform is SourcePlatform.WANTEDLY
+    assert job.location.startswith("東京都渋谷区")
+    assert job.posted_at is not None and job.posted_at.year == 2026
+    assert job.description.startswith("■仕事内容")
+
+
+def test_wantedly_default_feed_filters_by_title():
+    """With no keyword the client-side design filter is the only filter."""
+    records = [project(1, title="UI Designer"), project(2, title="営業マネージャー")]
+    assert [job.title for job in WantedlyScraper()._parse_projects(records)] == ["UI Designer"]
+
+
+def test_wantedly_keyword_search_trusts_the_server():
+    records = [project(1, title="バックエンドエンジニア募集")]
+    jobs = WantedlyScraper(keyword="engineer")._parse_projects(records)
+    assert len(jobs) == 1
+
+
+def test_wantedly_drops_malformed_projects():
+    jobs = WantedlyScraper()._parse_projects(
         [
-            {"title": "UI Designer", "company": "Acme", "url": "https://w.test/1",
-             "location": "Tokyo, 渋谷"},
-            {"title": "Sales", "company": "Nope", "url": "https://w.test/2",
-             "location": "Tokyo"},
-            {"title": "Broken"},  # no url
+            {"id": 1, "title": "UI Designer"},
+            {"id": 2},  # no title
+            "nonsense",
+            project(3, company=None),  # company missing → Unknown, still kept
         ]
     )
-    assert [job.url for job in jobs] == ["https://w.test/1"]
-    assert jobs[0].source_platform is SourcePlatform.WANTEDLY
+    assert [job.url.rsplit("/", 1)[-1] for job in jobs] == ["1", "3"]
+    assert jobs[1].company == "Unknown"
 
 
-def test_wantedly_platform_property():
-    assert WantedlyScraper().platform is SourcePlatform.WANTEDLY
+def test_wantedly_marks_remote_roles():
+    (job,) = WantedlyScraper()._parse_projects(
+        [project(location="オンライン", location_suffix="")]
+    )
+    assert job.location.startswith("Remote")
+
+
+def test_wantedly_pagination_stops_at_the_api_limit(monkeypatch: pytest.MonkeyPatch):
+    """Two API pages, then stop — the page count the API reports is respected."""
+    pages = {
+        1: {"data": [project(i) for i in (1, 2)], "_metadata": {"total_pages": 2}},
+        2: {"data": [project(i) for i in (3, 4)], "_metadata": {"total_pages": 2}},
+    }
+    calls: list[int] = []
+
+    def fake_fetch(self, page_number: int) -> dict:
+        calls.append(page_number)
+        return pages[page_number]
+
+    monkeypatch.setattr(WantedlyScraper, "_fetch_page", fake_fetch)
+    jobs = asyncio.run(WantedlyScraper(keyword="designer").fetch_jobs())
+    assert calls == [1, 2]
+    assert len(jobs) == 4
+
+
+def test_wantedly_reports_an_api_failure_instead_of_empty_results(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from jobreach.webclient import HttpError
+
+    def boom(self, page_number: int) -> dict:
+        raise HttpError("HTTP 403 Forbidden", status=403, url="https://api.test")
+
+    monkeypatch.setattr(WantedlyScraper, "_fetch_page", boom)
+    with pytest.raises(ScraperError, match="HTTP 403"):
+        asyncio.run(WantedlyScraper(keyword="designer").fetch_jobs())
+
+
+# --- Indeed ----------------------------------------------------------------
+
+
+def test_indeed_search_url_uses_the_japanese_market():
+    url = IndeedScraper(keyword="web designer", location="tokyo").build_search_url(1)
+    assert url.startswith("https://jp.indeed.com/jobs?")
+    assert "q=web+designer" in url
+    assert "hl=ja" in url
+    assert "l=%E6%9D%B1%E4%BA%AC" in url  # 東京
+    assert "start=" not in url
+
+
+def test_indeed_default_query_is_the_design_feed():
+    scraper = IndeedScraper(location="tokyo")
+    assert scraper.query == "デザイナー"
+    assert IndeedScraper(location="tokyo").build_search_url(1)
+
+
+def test_indeed_pages_with_a_zero_based_start():
+    url = IndeedScraper(keyword="engineer", location="tokyo").build_search_url(2)
+    assert "start=15" in url
+
+
+def test_indeed_location_accepts_slugs_and_place_names():
+    assert IndeedScraper(location="osaka").place == LOCATION_SLUGS["osaka"]
+    assert IndeedScraper(location="大阪").place == "大阪"
+    assert IndeedScraper(location="any").place == ""
+    assert "&l=" not in IndeedScraper(location="any").build_search_url(1)
+
+
+def indeed_card(**overrides) -> dict:
+    card = {
+        "jk": "bcf91e657e236bc7",
+        "title": "【アートディレクター】リモート可",
+        "company": "株式会社テスト",
+        "location": "東京都 23区",
+        "salary": "月給 27.6万円 ~ 40.1万円",
+        "snippet": "カード全体のテキスト",
+        "url": "https://jp.indeed.com/viewjob?jk=bcf91e657e236bc7",
+    }
+    card.update(overrides)
+    return card
+
+
+def test_indeed_parses_cards():
+    (job,) = IndeedScraper(keyword="designer")._parse_cards([indeed_card()])
+    assert job.url == "https://jp.indeed.com/viewjob?jk=bcf91e657e236bc7"
+    assert job.company == "株式会社テスト"
+    assert job.salary == "月給 27.6万円 ~ 40.1万円"
+    assert job.source_platform is SourcePlatform.INDEED
+
+
+def test_indeed_drops_foreign_and_malformed_cards():
+    jobs = IndeedScraper(keyword="designer")._parse_cards(
+        [
+            indeed_card(),
+            indeed_card(url="https://www.indeed.com/viewjob?jk=us1"),  # US market
+            indeed_card(title="", url="https://jp.indeed.com/viewjob?jk=x"),
+            {"url": "https://jp.indeed.com/viewjob?jk=no-title"},  # no title
+        ]
+    )
+    assert [job.url for job in jobs] == ["https://jp.indeed.com/viewjob?jk=bcf91e657e236bc7"]
+
+
+def test_indeed_ignores_non_card_payloads():
+    assert IndeedScraper(keyword="designer")._parse_cards([]) == []
+
+
+def test_indeed_asks_for_the_stealth_browser_first():
+    """Cloudflare is the reason this board was unsupported for so long."""
+    assert IndeedScraper.fetch_modes[0] == "stealthy"
+    assert "dynamic" in IndeedScraper.fetch_modes
 
 
 # --- Mynavi ----------------------------------------------------------------
 
 
+def mynavi_card(**overrides) -> dict:
+    card = {
+        "company": "Acme",
+        "matchedText": "Acme | Webデザイン",
+        "location": "Tokyo",
+        "url": "https://job.mynavi.jp/corp1",
+    }
+    card.update(overrides)
+    return card
+
+
 def test_mynavi_parses_and_deduplicates_cards():
-    scraper = Mynavi2027Scraper()
     seen: set[str] = set()
-    cards = [
-        {"company": "Acme", "matchedText": "Acme | Webデザイン", "location": "Tokyo",
-         "url": "https://job.mynavi.jp/corp1"},
-        {"company": "Acme", "matchedText": "Acme | Webデザイン", "location": "Tokyo",
-         "url": "https://job.mynavi.jp/corp1"},
-    ]
-    jobs = scraper._parse_cards(cards, "WEBデザイナー", seen)
+    jobs = Mynavi2027Scraper()._parse_cards(
+        [mynavi_card(), mynavi_card()], "WEBデザイナー", seen
+    )
     assert len(jobs) == 1
     assert jobs[0].title == "Acme (WEBデザイナー)"
 
 
 def test_mynavi_filters_non_design_cards():
     jobs = Mynavi2027Scraper()._parse_cards(
-        [{"company": "Acme", "matchedText": "Acme | 営業", "location": "Tokyo",
-          "url": "https://job.mynavi.jp/corp9"}],
+        [mynavi_card(matchedText="Acme | 営業", url="https://job.mynavi.jp/corp9")],
         "WEBデザイナー",
         set(),
     )
     assert jobs == []
+
+
+def test_mynavi_pagination_is_an_optional_click(monkeypatch: pytest.MonkeyPatch):
+    """A pager that does not exist is the last page — not a failure.
+
+    The step list is what a browser backend executes, so this asserts the
+    contract between the scraper and the fetch layer without launching one.
+    """
+    captured: dict[str, object] = {}
+
+    async def fake_fetch(self, url, *, steps=(), **kwargs):
+        captured["url"] = url
+        captured["steps"] = list(steps)
+        return FetchResult(status=200, url=url, title="", results={})
+
+    monkeypatch.setattr("jobreach.scrapers.base.BaseScraper.fetch", fake_fetch)
+    asyncio.run(Mynavi2027Scraper()._scrape_occupation("415", "WEBデザイナー", set()))
+
+    steps = captured["steps"]
+    assert isinstance(steps, list)
+    assert captured["url"] == "https://job.mynavi.jp/27/pc/search/occ415.html"
+    clicks = [step for step in steps if "click" in step]
+    assert clicks, "the occupation must follow its pager"
+    assert all(step.get("optional") for step in clicks), "a missing pager is not an error"
+    evaluates = [step for step in steps if "evaluate" in step]
+    assert [step["key"] for step in evaluates] == ["page1", "page2"]
 
 
 # --- LinkedIn --------------------------------------------------------------

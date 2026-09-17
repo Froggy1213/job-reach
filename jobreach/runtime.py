@@ -3,9 +3,9 @@
 The plugin is unusual among Hermes plugins in that it prefers *not* to import
 its engine into Hermes' own interpreter. Two reasons:
 
-* Hermes' runtime venv is Python 3.14. The scraping extra (Playwright) is a
-  large binary dependency that has no business living in — and being broken by
-  — Hermes' own environment.
+* Hermes' runtime venv is Python 3.14. The scraping stack (Playwright, or
+  Scrapling with its patched Chromium) is a large binary dependency that has no
+  business living in — and being broken by — Hermes' own environment.
 * A scrape takes 30–90 seconds. Running it in a subprocess keeps it cancellable
   and keeps a crashed browser from taking the agent down with it.
 
@@ -17,8 +17,15 @@ python:
 3. ``sys.executable``                     — works for everything except scraping,
                                              because the core is stdlib-only
 
-The venv lives under ``$JOBREACH_HOME`` (default ``~/.hermes/job-reach``), not
-inside the plugin directory, so ``hermes plugins update`` cannot wipe it.
+Browsers are a separate question, and a cheaper one to answer. The preferred
+backend is **Scrapling** — usually already installed for its MCP server, it
+solves Cloudflare challenges, and it needs no venv of ours. Only when Scrapling
+is absent does ``setup`` build the plugin's own venv with Playwright plus
+Chromium (~150 MB). Both paths are reported by ``doctor``, board by board.
+
+The venv lives under ``$JOBREACH_HOME`` (default
+``~/.hermes/plugin-data/job-reach``), not inside the plugin directory, so
+``hermes plugins update`` cannot wipe it.
 """
 
 from __future__ import annotations
@@ -41,7 +48,7 @@ from .scrapers.base import PLAYWRIGHT_HINT
 
 logger = get_logger("runtime")
 
-#: Extra packages the scrapers need, installed into the plugin venv.
+#: Extra packages the Playwright fallback needs, installed into the plugin venv.
 SCRAPE_PACKAGES = ("playwright", "playwright-stealth")
 
 #: Python version requested when creating the venv. 3.11 is the floor declared
@@ -137,10 +144,10 @@ def run_engine(
     """Run the engine CLI and capture its output. Never raises on exit code.
 
     Uses :func:`jobreach.proc.run_captured` rather than ``subprocess.run`` so a
-    timeout tears down the engine's **whole process tree**. The engine starts
-    Playwright, which starts a Node driver, which starts Chromium; killing only
-    the Python child would leave the browser running, and a monitoring cron job
-    that hits this repeatedly would accumulate orphans.
+    timeout tears down the engine's **whole process tree**. The engine starts a
+    browser (and its driver processes); killing only the Python child would
+    leave Chromium running, and a monitoring cron job that hits this repeatedly
+    would accumulate orphans.
     """
     argv = [*engine_argv(), *args]
     logger.debug("running engine", extra={"argv": argv})
@@ -165,6 +172,7 @@ class SetupReport:
     steps: list[dict[str, Any]] = field(default_factory=list)
     ok: bool = True
     venv: str | None = None
+    backend: str = ""
     hint: str = ""
 
     def add(self, name: str, ok: bool, detail: str = "") -> None:
@@ -176,20 +184,66 @@ class SetupReport:
         return {
             "ok": self.ok,
             "venv": self.venv,
+            "backend": self.backend,
             "steps": self.steps,
             "hint": self.hint,
             "interpreter": resolve_interpreter()[0],
         }
 
 
+def scrapling_status() -> dict[str, Any]:
+    """Describe the Scrapling install this machine has, if any."""
+    from .scrapling import probe, scrapling_python
+
+    python, source = scrapling_python()
+    if not python:
+        return {"ready": False, "python": None, "source": "", "version": "", "problem": ""}
+    outcome = probe(python)
+    return {
+        "ready": outcome.ok,
+        "python": python,
+        "source": source,
+        "version": outcome.version,
+        "problem": "" if outcome.ok else outcome.detail,
+    }
+
+
 def setup_runtime(*, with_browser: bool = True, force: bool = False) -> SetupReport:
-    """Create the plugin venv and install the scraping extra.
+    """Prepare the scraping runtime.
+
+    Scrapling is preferred and, when present, *is* the setup: it is checked and
+    reported, and nothing is downloaded. Otherwise the plugin builds its own
+    venv with Playwright and Chromium.
 
     Args:
-        with_browser: also download the Chromium build Playwright drives.
-        force: recreate the venv even if it already exists.
+        with_browser: download the Playwright Chromium build (ignored when
+            Scrapling is available — the browser download exists only for the
+            fallback path).
+        force: recreate the plugin venv even if it already exists.
     """
     report = SetupReport()
+
+    scrapling = scrapling_status()
+    if scrapling["ready"]:
+        report.backend = "scrapling"
+        report.add(
+            "scrapling",
+            True,
+            f"{scrapling['version']} at {scrapling['python']} [{scrapling['source']}] — "
+            "no download needed",
+        )
+        report.add("playwright", True, "skipped: Scrapling is already the backend")
+        report.add("chromium", True, "skipped: Scrapling drives its own browser")
+        report.add("engine smoke test", *smoke_test())
+        return report
+
+    report.backend = "playwright"
+    report.add(
+        "scrapling",
+        True,
+        "not installed — using the plugin's own Playwright browser instead "
+        f"(install it for Cloudflare-capable fetching: {PLAYWRIGHT_HINT.splitlines()[0]})",
+    )
 
     uv = uv_path()
     target = venv_dir()
@@ -248,14 +302,19 @@ def setup_runtime(*, with_browser: bool = True, force: bool = False) -> SetupRep
     else:
         report.add("chromium", True, "skipped (--no-browser)")
 
-    ok, detail = _setup_step(
-        [str(python), "-m", "jobreach", "doctor", "--json"],
+    report.add("engine smoke test", *smoke_test())
+    return report
+
+
+def smoke_test() -> tuple[bool, str]:
+    """Run ``jobreach doctor`` through the engine interpreter."""
+    python, _ = resolve_interpreter()
+    return _setup_step(
+        [python, "-m", "jobreach", "doctor", "--json"],
         SMOKE_TEST_TIMEOUT,
         cwd=plugin_dir(),
         env=engine_env(),
     )
-    report.add("engine smoke test", ok, detail[:300])
-    return report
 
 
 def _setup_step(
@@ -279,7 +338,7 @@ def _setup_step(
         return False, f"could not start {argv[0]}: {exc}"
     if result.returncode != 0:
         return False, (result.stderr or result.stdout).strip()[:500]
-    return True, (result.stdout or "").strip()
+    return True, (result.stdout or "").strip()[:300]
 
 
 # --------------------------------------------------------------------------- #
@@ -288,7 +347,7 @@ def _setup_step(
 
 
 def probe_browser_support(python: str, *, timeout: float = 60.0) -> tuple[bool, str]:
-    """Ask *python* whether it can import the browser stack.
+    """Ask *python* whether it can import the Playwright stack.
 
     The probe runs in a subprocess on purpose. ``doctor`` is frequently executed
     by an interpreter that is *not* the engine interpreter — Hermes' own Python,
@@ -308,15 +367,50 @@ def probe_browser_support(python: str, *, timeout: float = 60.0) -> tuple[bool, 
     return False, f"{detail}\n{PLAYWRIGHT_HINT}"
 
 
+def backend_report() -> dict[str, Any]:
+    """Describe the backends: which one a scrape would use, and why.
+
+    Never raises: a missing backend is a *finding* here (``doctor`` exists to
+    report exactly that), not an error.
+    """
+    from .fetchers import backend_preference, select_backend
+
+    scrapling = scrapling_status()
+    python, _ = resolve_interpreter()
+    playwright_ok, playwright_problem = probe_browser_support(python)
+
+    payload: dict[str, Any] = {
+        "preference": backend_preference(),
+        "scrapling": scrapling,
+        "playwright": {
+            "ready": playwright_ok,
+            "python": python,
+            "problem": playwright_problem,
+        },
+        "selected": None,
+        "problem": "",
+        "hint": "",
+    }
+    try:
+        backend = select_backend()
+    except Exception as exc:  # noqa: BLE001 — reported, never raised
+        payload["problem"] = str(exc)
+        payload["hint"] = getattr(exc, "hint", "")
+    else:
+        payload["selected"] = backend.to_dict()
+    return payload
+
+
 def diagnostics() -> dict[str, Any]:
-    """Describe the runtime: paths, interpreter, optional deps, board readiness."""
+    """Describe the runtime: paths, interpreter, backends, board readiness."""
     from .config import default_db_path, find_vault
-    from .scrapers import SCRAPERS, is_cli_scraper
+    from .scrapers import SCRAPERS, is_cli_scraper, needs_browser
 
     python, source = resolve_interpreter()
     db = default_db_path()
     vault = find_vault()
-    browser_ok, browser_problem = probe_browser_support(python)
+    backends = backend_report()
+    backend_ready = backends["selected"] is not None
 
     boards: dict[str, dict[str, Any]] = {}
     for name, scraper_class in SCRAPERS.items():
@@ -326,27 +420,28 @@ def diagnostics() -> dict[str, Any]:
             boards[name] = {
                 "ready": not missing,
                 "backend": "cli",
+                "needs_browser": False,
                 "problem": (
                     f"{executable!r} is not on PATH\n{scraper_class.install_hint}"
                     if missing
                     else None
                 ),
             }
+        elif not needs_browser(name):
+            boards[name] = {
+                "ready": True,
+                "backend": "http",
+                "needs_browser": False,
+                "problem": None,
+                "note": "read over the board's JSON API — no browser involved",
+            }
         else:
             boards[name] = {
-                "ready": browser_ok,
-                "backend": "playwright",
-                "problem": browser_problem or None,
+                "ready": backend_ready,
+                "backend": (backends["selected"] or {}).get("name") or "none",
+                "needs_browser": True,
+                "problem": None if backend_ready else (backends["problem"] or "no browser backend"),
             }
-    boards["indeed"] = {
-        "ready": True,
-        "backend": "browser-ingest",
-        "problem": None,
-        "note": (
-            "ingest-only: Cloudflare blocks headless clients, so the agent "
-            "drives a real browser and feeds the cards to job_ingest"
-        ),
-    }
 
     return {
         "plugin_version": __version__,
@@ -354,7 +449,8 @@ def diagnostics() -> dict[str, Any]:
         "python_executable": sys.executable,
         "engine_interpreter": python,
         "engine_interpreter_source": source,
-        "browser_ready": browser_ok,
+        "browser_ready": backend_ready,
+        "backend": backends,
         "plugin_dir": str(plugin_dir()),
         "data_dir": str(jobreach_home()),
         "database": str(db),

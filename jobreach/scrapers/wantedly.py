@@ -1,211 +1,216 @@
 """Wantedly (ウォンテッドリー) — the general-purpose Japanese board.
 
-Wantedly supports real server-side search, so this is the board that answers
-arbitrary keyword queries in any language: ``--keyword "frontend engineer"``
-goes into its ``q=`` parameter, ``--location`` into ``locations=``. With no
-keyword the scraper falls back to Wantedly's design occupations, which is the
-project's original default feed.
+Wantedly is the board that answers arbitrary keyword queries in any language,
+and it turns out to answer them over plain JSON: ``/api/v1/projects`` returns
+real server-side search results — title, company, location, description,
+publication date — with no JavaScript involved. Reading it with
+:mod:`jobreach.webclient` means this scraper needs **no browser at all**, which
+is why :attr:`WantedlyScraper.needs_browser` is ``False``: the CLI will never
+refuse to run Wantedly because a browser stack is missing.
 
-Markup notes (the fragile parts, kept deliberately explicit):
+That is a correction, not just an optimisation. The HTML search page
+(``/projects?q=…``) **discards** query parameters it no longer recognises and
+redirects to the generic feed, so a keyword search through the page silently
+returned unrelated listings — and because the old scraper declared
+``url_encodes_keyword = True`` the client-side filter did not catch them either.
+The API endpoint honours ``q=`` for real, so server-side filtering is now what
+it always claimed to be.
 
-* Cards are ``<a href="/projects/{id}">``. The company link is a **sibling**
-  of the project link, not a descendant — so the parser walks up to the card
-  root before querying for it.
-* Titles live in a nested ``<h2>/<h3>``, not always a direct child of the link.
-* Location is only present as free text inside the card, so it is recovered by
-  scanning for Tokyo ward names in Japanese and romaji.
+Parameters that matter:
+
+* ``q`` — free-text query; Japanese terms return Japanese listings.
+* ``areas`` — location slug (``tokyo``, ``osaka``, …); ``any`` omits the filter.
+* ``page`` — 1-based; 10 results per page, ``_metadata.total_pages`` caps it.
+
+The fragile markup work of the previous version (company links being siblings of
+project links, titles in nested headings, ward names recovered from free text)
+is gone: these fields now come from the board's own data model instead of from a
+heuristic over rendered HTML.
 """
 
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from typing import Any
-from urllib.parse import urlencode
 
 from ..domain import JobPosting, SourcePlatform
 from ..errors import ScraperError
 from ..logging_setup import get_logger
+from ..webclient import HttpError, build_url, get_json
 from .base import BaseScraper
 
 logger = get_logger("scrapers.wantedly")
 
 BASE_URL = "https://www.wantedly.com"
-DESIGN_OCCUPATIONS = "ui_ux_designer,web_designer,graphic_designer"
+API_URL = f"{BASE_URL}/api/v1/projects"
 
-#: Two pages of ~50 cards is the sweet spot: enough coverage, bounded runtime.
-MAX_PAGES = 2
-PAGE_DELAY_SECONDS = 3.0
-CARD_SELECTOR_TIMEOUT_MS = 12_000
-RENDER_SETTLE_MS = 3_300
+#: Public project page — what a listing URL is built from.
+PROJECT_URL = f"{BASE_URL}/projects"
 
-_CARD_SCRIPT = """() => {
-    const results = [];
-    const seen = new Set();
-    const links = document.querySelectorAll('a[href^="/projects/"]');
+#: Wantedly serves 10 records per page through this endpoint (a larger
+#: ``per_page`` is accepted and ignored, so pagination is the only lever).
+PER_PAGE = 10
 
-    for (const link of links) {
-        try {
-            const href = link.getAttribute('href');
-            if (!href) continue;
-            // /projects/{digits} only — skip sub-pages like /projects/123/members
-            if (!/^\\/projects\\/\\d+(\\/|\\?|$)/.test(href)) continue;
+#: Pages to walk. A keyword search earns one more page than the generic feed,
+#: which is mostly noise and gets filtered by title anyway.
+MAX_PAGES_KEYWORD = 3
+MAX_PAGES_DEFAULT = 2
 
-            const projectId = href.match(/\\/projects\\/(\\d+)/)[1];
-            if (seen.has(projectId)) continue;
-            seen.add(projectId);
+#: Location sentinels that mean "do not filter by area".
+ANYWHERE = {"any", "all", "", "japan"}
 
-            const linkText = link.textContent.trim();
-            if (linkText.length < 10) continue;
+REQUEST_TIMEOUT = 30.0
 
-            // The company <a> is a sibling of the project <a>, so query from
-            // the shared card container rather than from the link itself.
-            const card = link.closest('article')
-                      || link.closest('[class*="Card"]')
-                      || link.closest('[class*="card"]')
-                      || link.closest('[class*="project"]')
-                      || link.closest('li')
-                      || link.parentElement?.parentElement?.parentElement
-                      || link;
-
-            let title = '';
-            for (const tag of ['h2', 'h3', 'h4', 'h1']) {
-                const heading = link.querySelector(tag);
-                if (heading) { title = heading.textContent.trim(); break; }
-            }
-            if (!title || title.length < 3) title = linkText.substring(0, 200);
-
-            let company = 'Unknown';
-            const companyLink = card.querySelector('a[href^="/companies/"]');
-            if (companyLink) {
-                const text = companyLink.textContent.trim();
-                if (text) company = text;
-            }
-            if (company === 'Unknown') {
-                for (const img of card.querySelectorAll('img')) {
-                    const alt = (img.getAttribute('alt') || '').trim();
-                    if (alt.length >= 2 && !/^(logo|image|photo|icon|project)$/i.test(alt)) {
-                        company = alt;
-                        break;
-                    }
-                }
-            }
-
-            const cardText = card.textContent || '';
-            const kanjiWards = ['渋谷','新宿','港区','千代田','目黒','品川','世田谷','中央区',
-                                '文京','台東','墨田','江東','豊島','六本木','代々木','恵比寿',
-                                '表参道','大手町','丸の内','秋葉原','赤坂','虎ノ門'];
-            const romajiWards = ['Shibuya','Shinjuku','Minato','Chiyoda','Meguro',
-                                 'Roppongi','Ebisu','Akasaka','Ginza','Harajuku'];
-
-            let location = 'Tokyo';
-            for (const ward of kanjiWards) {
-                if (cardText.includes(ward)) { location = 'Tokyo, ' + ward; break; }
-            }
-            if (location === 'Tokyo') {
-                for (const ward of romajiWards) {
-                    if (cardText.includes(ward)) { location = 'Tokyo, ' + ward; break; }
-                }
-            }
-            if (/フルリモート|完全リモート|Full Remote|remote/i.test(cardText)) {
-                location = location === 'Tokyo' ? 'Remote (Tokyo base)' : location + ' / Remote';
-            }
-
-            results.push({
-                title,
-                company,
-                url: 'https://www.wantedly.com' + href.split('?')[0],
-                location,
-            });
-        } catch (e) { /* skip malformed card */ }
-    }
-    return results;
-}"""
+#: Politeness pause between pages — the whole search is a few HTTP calls.
+PAGE_DELAY_SECONDS = 0.4
 
 
 class WantedlyScraper(BaseScraper):
-    """Scrape the Wantedly project feed."""
+    """Search Wantedly's project API."""
 
-    url_encodes_keyword = True  # Wantedly filters by q= server-side
+    url_encodes_keyword = True  # the API filters by q= server-side
+    needs_browser = False  # JSON over HTTP: no browser, no venv, no Chromium
 
     @property
     def platform(self) -> SourcePlatform:
         return SourcePlatform.WANTEDLY
 
+    @property
+    def area_slug(self) -> str | None:
+        """Location slug for ``areas=``, or ``None`` to search nationwide."""
+        location = (self.location or "tokyo").lower()
+        return None if location in ANYWHERE else location
+
+    def build_api_url(self, page_number: int = 1) -> str:
+        """The API URL for *page_number* — used by diagnostics and tests."""
+        return build_url(
+            API_URL, {"q": self.keyword, "areas": self.area_slug, "page": page_number}
+        )
+
     async def fetch_jobs(self) -> list[JobPosting]:
-        """Walk up to :data:`MAX_PAGES` result pages and merge the cards."""
+        """Walk the result pages until they run out or the cap is reached."""
         jobs: list[JobPosting] = []
         seen: set[str] = set()
+        max_pages = MAX_PAGES_KEYWORD if self.keyword else MAX_PAGES_DEFAULT
 
-        async with self.browser_page() as page:
-            for page_number in range(1, MAX_PAGES + 1):
-                url = self.build_page_url(page_number)
-                try:
-                    await self.goto(page, url)
-                    await page.wait_for_selector(
-                        'a[href^="/projects/"]',
-                        state="attached",
-                        timeout=CARD_SELECTOR_TIMEOUT_MS,
-                    )
-                    # React lazy-loads cards as they scroll into view.
-                    await page.evaluate("window.scrollBy(0, 600)")
-                    await page.wait_for_timeout(1_500)
-                    await page.evaluate("window.scrollBy(0, 600)")
-                    await page.wait_for_timeout(RENDER_SETTLE_MS)
+        for page_number in range(1, max_pages + 1):
+            try:
+                payload = await asyncio.to_thread(self._fetch_page, page_number)
+            except HttpError as exc:
+                if page_number == 1:
+                    raise ScraperError(f"Wantedly API request failed: {exc}") from exc
+                logger.warning("Wantedly page failed, stopping", extra={"page": page_number})
+                break
 
-                    page_jobs = self._parse_cards(await page.evaluate(_CARD_SCRIPT))
-                except Exception as exc:  # noqa: BLE001 — one bad page ≠ failed run
-                    if page_number == 1:
-                        raise ScraperError(f"Wantedly page 1 failed: {exc}") from exc
-                    logger.warning("Wantedly page failed, stopping", extra={"page": page_number})
-                    break
+            fresh = [
+                job for job in self._parse_projects(self._records(payload)) if job.url not in seen
+            ]
+            if not fresh:
+                break
+            seen.update(job.url for job in fresh)
+            jobs.extend(fresh)
 
-                fresh = [job for job in page_jobs if job.url not in seen]
-                if not fresh:
-                    break  # pagination exhausted
-                seen.update(job.url for job in fresh)
-                jobs.extend(fresh)
+            if page_number >= self._total_pages(payload):
+                break
+            await asyncio.sleep(PAGE_DELAY_SECONDS)
 
-                if page_number < MAX_PAGES:
-                    await asyncio.sleep(PAGE_DELAY_SECONDS)
-
-        logger.info("Wantedly scrape complete", extra={"jobs": len(jobs)})
+        logger.info("Wantedly search complete", extra={"jobs": len(jobs)})
         return jobs
 
-    def _parse_cards(self, raw_items: list[dict[str, Any]]) -> list[JobPosting]:
-        """Map the JS extraction output onto domain objects, skipping bad rows."""
+    # -- HTTP ----------------------------------------------------------------
+
+    def _fetch_page(self, page_number: int) -> dict[str, Any]:
+        """Fetch one API page (runs in a worker thread — callers ``await`` it)."""
+        payload = get_json(
+            API_URL,
+            params={"q": self.keyword, "areas": self.area_slug, "page": page_number},
+            headers={"Referer": f"{BASE_URL}/projects"},
+            timeout=REQUEST_TIMEOUT,
+        )
+        if not isinstance(payload, dict):
+            raise ScraperError(
+                f"Wantedly API returned {type(payload).__name__}, expected an object"
+            )
+        return payload
+
+    @staticmethod
+    def _records(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """List the project records out of an API response."""
+        records = payload.get("data")
+        if not isinstance(records, list):
+            raise ScraperError("Wantedly API response has no `data` array")
+        return [record for record in records if isinstance(record, dict)]
+
+    @staticmethod
+    def _total_pages(payload: dict[str, Any]) -> int:
+        """Total page count, or 1 when the API omits the metadata."""
+        metadata = payload.get("_metadata") or {}
+        try:
+            return max(1, int(metadata.get("total_pages") or 1))
+        except (TypeError, ValueError):
+            return 1
+
+    # -- parsing -------------------------------------------------------------
+
+    def _parse_projects(self, records: list[dict[str, Any]]) -> list[JobPosting]:
+        """Map API records onto domain objects, skipping malformed ones."""
         jobs: list[JobPosting] = []
-        for item in raw_items:
+        for record in records:
             try:
-                if not self.matches(str(item["title"])):
+                title = str(record.get("title") or "").strip()
+                project_id = record.get("id")
+                if not title or project_id is None:
                     continue
+                if not self.matches(title):
+                    continue
+                company = record.get("company") or {}
                 jobs.append(
                     JobPosting(
-                        title=item["title"],
-                        company=item.get("company") or "Unknown",
-                        url=item["url"],
-                        location=item.get("location") or "Tokyo",
+                        title=title,
+                        company=str(company.get("name") or "Unknown").strip(),
+                        url=f"{PROJECT_URL}/{project_id}",
+                        location=self._location(record),
                         source_platform=self.platform,
+                        description=self._description(record),
+                        posted_at=self._published_at(record),
                     )
                 )
-            except Exception:  # noqa: BLE001 — malformed card, keep going
-                logger.debug("skipping malformed Wantedly card")
+            except Exception:  # noqa: BLE001 — malformed record, keep going
+                logger.debug("skipping malformed Wantedly project")
         return jobs
 
-    def build_page_url(self, page_number: int) -> str:
-        """Build the search URL for *page_number*.
+    @staticmethod
+    def _location(record: dict[str, Any]) -> str:
+        """Best available location string for a project."""
+        parts = [
+            str(record.get("location") or "").strip(),
+            str(record.get("location_suffix") or "").strip(),
+        ]
+        joined = " ".join(part for part in parts if part)
+        if not joined:
+            return "Japan"
+        if "オンライン" in joined or "リモート" in joined:
+            return f"Remote ({joined})"
+        return joined
 
-        A keyword becomes ``q=``; without one, Wantedly's design occupation
-        codes are used. ``location`` maps to the ``locations`` slug, and the
-        sentinel ``any`` omits the filter entirely.
+    @staticmethod
+    def _description(record: dict[str, Any]) -> str | None:
+        """Project description, when the API included one.
+
+        Worth keeping: ``validation="llm"`` classifies far better with the body
+        text than with a title alone.
         """
-        params: dict[str, str | int] = {"type": "mixed", "page": page_number}
-        if self.keyword:
-            params["q"] = self.keyword
-        else:
-            params["occupations"] = DESIGN_OCCUPATIONS
+        text = str(record.get("description") or "").strip()
+        return text or None
 
-        location = (self.location or "tokyo").lower()
-        if location not in {"any", "all", ""}:
-            params["locations"] = location
-
-        return f"{BASE_URL}/projects?{urlencode(params)}"
+    @staticmethod
+    def _published_at(record: dict[str, Any]) -> datetime | None:
+        """Publication timestamp, when it parses (the API sends ISO-8601)."""
+        raw = str(record.get("published_at") or "").strip()
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            return None

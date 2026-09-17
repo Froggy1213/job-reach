@@ -18,9 +18,13 @@ from jobreach.config import (
 )
 
 
-def test_default_sources_exclude_indeed():
-    """Indeed has no scraper, so it must never be in the scrape defaults."""
-    assert "indeed" not in DEFAULT_SOURCES
+def test_default_sources_are_the_design_feed():
+    """Indeed joined the scrapers, but the *default* feed is unchanged.
+
+    A no-argument search is the project's original design-in-Tokyo feed; Indeed
+    covers all of Japan's job market and is a deliberate choice, not a default.
+    """
+    assert DEFAULT_SOURCES == ("wantedly", "mynavi2027", "linkedin")
 
 
 def test_data_home_follows_hermes_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -86,8 +90,9 @@ def test_all_expands_to_every_board():
     ]
 
 
-def test_scraped_excludes_ingest_only_boards():
-    assert Sources.parse("all").scraped == ("wantedly", "mynavi2027", "linkedin")
+def test_all_boards_are_scrapable():
+    """``Sources.scraped`` used to drop Indeed (ingest-only); now it keeps it."""
+    assert Sources.parse("all").scraped == ("wantedly", "mynavi2027", "linkedin", "indeed")
 
 
 def test_unknown_source_is_rejected():

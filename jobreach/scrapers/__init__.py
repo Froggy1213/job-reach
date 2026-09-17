@@ -8,6 +8,11 @@ Adding a board is three edits and no more:
 
 The CLI, the pipeline, and the Hermes tools all read this registry, so nothing
 else needs to learn about the new board.
+
+Board selection also feeds the two capability questions the CLI asks before a
+run: *does this board need a browser at all?* (Wantedly does not — it is read
+over HTTP) and *is one available?* (:func:`check_source_requirements` only
+probes the browser stack when a selected board actually needs it).
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ from ..domain import SourcePlatform
 from . import base
 from .base import BaseScraper
 from .cli_base import CliScraper
+from .indeed import IndeedScraper
 from .linkedin import LinkedInScraper
 from .mynavi2027 import Mynavi2027Scraper
 from .wantedly import WantedlyScraper
@@ -27,16 +33,21 @@ SCRAPERS: dict[str, type[BaseScraper]] = {
     "wantedly": WantedlyScraper,
     "mynavi2027": Mynavi2027Scraper,
     "linkedin": LinkedInScraper,
+    "indeed": IndeedScraper,
 }
 
 #: Boards that cannot be scraped and must be fed in via ``job_ingest``.
-INGEST_ONLY: dict[str, SourcePlatform] = {
-    "indeed": SourcePlatform.INDEED,
-}
+#:
+#: Empty on purpose, and worth a note: Indeed Japan used to live here, because
+#: Cloudflare blocked every headless client. A stealth browser now reads it, so
+#: the board graduated to a scraper — and ``job_ingest`` remains as the fallback
+#: for the runs automation cannot win.
+INGEST_ONLY: dict[str, SourcePlatform] = {}
 
 __all__ = [
     "BaseScraper",
     "CliScraper",
+    "IndeedScraper",
     "LinkedInScraper",
     "Mynavi2027Scraper",
     "WantedlyScraper",
@@ -45,12 +56,34 @@ __all__ = [
     "available_sources",
     "build_scrapers",
     "check_source_requirements",
+    "is_cli_scraper",
+    "needs_browser",
+    "scraper_for",
 ]
 
 
 def available_sources() -> list[str]:
     """Every board name accepted by ``--source``, scrapers first."""
     return [*SCRAPERS, *INGEST_ONLY]
+
+
+def scraper_for(name: str) -> type[BaseScraper] | None:
+    """Return the scraper class for *name*, or ``None`` if it is unknown."""
+    return SCRAPERS.get(str(name).strip().lower())
+
+
+def is_cli_scraper(name: str) -> bool:
+    """Whether *name* is served by an external CLI rather than a browser."""
+    cls: Callable[..., BaseScraper] | None = scraper_for(name)
+    return bool(cls and issubclass(cls, CliScraper))
+
+
+def needs_browser(name: str) -> bool:
+    """Whether *name* requires a browser stack (CLI and HTTP boards do not)."""
+    cls = scraper_for(name)
+    if cls is None:
+        return False
+    return bool(cls.needs_browser) and not is_cli_scraper(name)
 
 
 def build_scrapers(
@@ -64,16 +97,15 @@ def build_scrapers(
     """Instantiate one scraper per requested board name.
 
     Raises:
-        ValueError: if a name has no scraper (``indeed`` is ingest-only).
+        ValueError: if a name has no scraper.
     """
     scrapers: list[BaseScraper] = []
     for name in names:
         key = str(name).strip().lower()
         if key in INGEST_ONLY:
             raise ValueError(
-                f"{key!r} has no scraper — Cloudflare blocks headless clients. "
-                f"Fetch it with a real browser and push the cards through "
-                f"the job_ingest tool instead."
+                f"{key!r} has no scraper — fetch it with a real browser and push "
+                f"the cards through the job_ingest tool instead."
             )
         try:
             scraper_class = SCRAPERS[key]
@@ -97,39 +129,25 @@ def check_source_requirements(names: list[str] | tuple[str, ...]) -> dict[str, s
     Called by the CLI before a search so a missing browser stack fails
     immediately with a fix, instead of after every board has timed out.
 
-    The probe is reached through the :mod:`~jobreach.scrapers.base` module
-    rather than a name imported into this one, so the browser check has exactly
-    one interception point — ``base.require_playwright``. Binding the function
-    directly here would silently ignore a patch applied at its definition site.
+    Only boards that actually need a browser are probed: Wantedly is read over
+    HTTP and LinkedIn through ``opencli``, so neither may be blocked by an
+    unrelated missing dependency. The probe is reached through the
+    :mod:`~jobreach.scrapers.base` module rather than a name imported into this
+    one, so backend selection has exactly one interception point —
+    ``base.probe_browser_stack``. Binding the function directly here would
+    silently ignore a patch applied at its definition site.
 
     Returns:
         Mapping of board name → human-readable problem. Empty means all good.
-        Boards served by an external CLI are never included: they need no
-        browser.
     """
     problems: dict[str, str] = {}
-    browser_boards = [
-        str(name).strip().lower()
-        for name in names
-        if (cls := scraper_for(str(name))) is not None and not issubclass(cls, CliScraper)
-    ]
+    browser_boards = [str(name).strip().lower() for name in names if needs_browser(str(name))]
     if not browser_boards:
         return problems
     try:
-        base.require_playwright()
+        base.probe_browser_stack()
     except Exception as exc:  # noqa: BLE001 — the hint is the whole point
         hint = getattr(exc, "hint", "") or str(exc)
         for name in browser_boards:
             problems[name] = hint
     return problems
-
-
-def scraper_for(name: str) -> type[BaseScraper] | None:
-    """Return the scraper class for *name*, or ``None`` if it is ingest-only."""
-    return SCRAPERS.get(str(name).strip().lower())
-
-
-def is_cli_scraper(name: str) -> bool:
-    """Whether *name* is served by an external CLI rather than Playwright."""
-    cls: Callable[..., BaseScraper] | None = scraper_for(name)
-    return bool(cls and issubclass(cls, CliScraper))

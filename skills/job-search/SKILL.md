@@ -1,7 +1,7 @@
 ---
 name: job-search
 description: Find jobs on Japanese boards and track what is new.
-version: 2.0.0
+version: 2.1.0
 author: Froggy1213
 license: MIT
 platforms: [macos, linux]
@@ -42,37 +42,38 @@ development work). For non-Japanese boards use the relevant dedicated tool.
 | Tool | Use it for |
 |------|-----------|
 | `job_search` | Live scrape of the boards. Returns the result envelope. |
-| `job_ingest` | **The only way Indeed Japan listings enter the store.** |
+| `job_ingest` | Fallback: listings you fetched by hand enter the same pipeline. |
 | `job_list` | Read what is already stored — no network, instant. |
 | `job_note` | Render a result envelope into an Obsidian Markdown note. |
-| `job_status` | Store counts, last run, and which boards can actually run. |
-| `job_setup` | One-time runtime install (venv + Chromium + skill). |
+| `job_status` | Store counts, last run, browser backend, board readiness. |
+| `job_setup` | One-time runtime install (adopts Scrapling, or builds Playwright). |
 | `job_cron` | Schedule recurring monitoring through `hermes cron`. |
 
 ## Board coverage — read this before choosing sources
 
-| Board | Selector | Keyword | Location | Notes |
-|-------|----------|---------|----------|-------|
-| Wantedly | `wantedly` | ✅ server-side | ✅ slug | **The general-purpose board.** Arbitrary queries in any language work. |
-| Mynavi 2027 | `mynavi2027` | ⚠️ best-effort | ❌ ignored | New-graduate, design-only, nationwide, scraped by occupation code. |
-| LinkedIn | `linkedin` | ✅ server-side | ✅ | Needs Chrome running with the OpenCLI extension. |
-| Indeed Japan | `indeed` | — | — | **No scraper.** Cloudflare blocks headless clients; only `job_ingest`. |
+| Board | Selector | Keyword | Location | Cost | Notes |
+|-------|----------|---------|----------|------|-------|
+| Wantedly | `wantedly` | ✅ server-side | ✅ slug | ~4 s | **The general-purpose board.** Read over its JSON API — no browser, any language. |
+| Indeed Japan | `indeed` | ✅ server-side | ✅ slug or 地名 | ~30 s | The widest market. Needs a stealth browser; the only board that can be bot-blocked. |
+| Mynavi 2027 | `mynavi2027` | ⚠️ best-effort | ❌ ignored | ~1 min | New-graduate, design-only, nationwide, by occupation code. |
+| LinkedIn | `linkedin` | ✅ server-side | ✅ | ~20 s | Needs Chrome running with the OpenCLI extension. |
 
 **Rule of thumb:** for any general or non-design search
 (`"frontend engineer"`, `"marketing"`, `"データサイエンティスト"`) pass
-`sources: ["wantedly"]` — or add `linkedin`. Leave the default
-(`wantedly, mynavi2027, linkedin`) only for the design-in-Tokyo use case the
-project was built around.
+`sources: ["wantedly"]`, optionally adding `"indeed"` for coverage or
+`"linkedin"` for the English-speaking market. The default
+(`wantedly, mynavi2027, linkedin`) is the design-in-Tokyo feed the project was
+built around; it is *not* the best choice for an arbitrary query.
 
-`location` is a Wantedly slug: `tokyo` (default), `osaka`, `any` for
-nationwide. Mynavi ignores it entirely.
+`location` accepts a slug (`tokyo`, `osaka`), a Japanese place name (`大阪`), or
+`any` for nationwide. Mynavi ignores it entirely.
 
 ## Default flow
 
 1. **`job_status`** when anything seems off, or on the first run of a session.
-   It reports whether the scraping runtime is installed.
-2. **`job_search`** with the user's query. A live scrape takes **30–90 seconds
-   per board** — wait, do not retry in a loop.
+   It reports the browser backend and whether each board can run.
+2. **`job_search`** with the user's query. Expect 4–90 seconds depending on the
+   boards — wait, do not retry in a loop.
 3. **`job_note`**, passing the exact `result` object `job_search` returned.
    This is the default deliverable; skip it only when the user explicitly asks
    for inline output only.
@@ -82,39 +83,45 @@ nationwide. Mynavi ignores it entirely.
 
 Answer in the language the user writes in.
 
-## Indeed Japan (agent-driven, real browser required)
+## How fetching works (and how to fix it when it doesn't)
 
-Indeed Japan has **no scraper** on purpose: Cloudflare blocks headless and
-plain-HTTP clients (verified 403), but a **real browser passes** and serves
-full listings. So *you* fetch them and hand them to `job_ingest`.
+Scrapers never open a browser themselves — they hand a list of page steps to a
+**backend**, and the plugin picks the best one available:
 
-Only do this when the user actually asks for Indeed.
+| Backend | Chosen when | Notes |
+|---------|-------------|-------|
+| `scrapling` | Installed (the default) | Stealth browser, solves Cloudflare. Auto-detected; needs no download. |
+| `playwright` | Scrapling absent but the plugin venv exists | Built by `job_setup` (~150 MB Chromium). |
 
-1. Build the URL with the Japanese market locked in:
-   `https://jp.indeed.com/jobs?q=<keyword>&l=<location>&hl=ja`
-   (URL-encode both; default location 東京 = `l=%E6%9D%B1%E4%BA%AC`).
-   Without `hl=ja` Indeed may serve the US site.
-2. Open it in a **real browser** (browser tool — not a headless fetch). Wait
-   2–3 s for the cards to render, then **verify `location.host` is
-   `jp.indeed.com`**. If it bounced to `www.indeed.com`, Indeed geo-redirected
-   you to the US site: reopen the `jp.indeed.com … &hl=ja` URL; if it keeps
-   bouncing, a Japanese network is required. Never extract from
-   `www.indeed.com` — those are US jobs.
-3. **Detect a block before trusting anything.** `Just a moment`,
-   `Additional Verification Required`, `Ray ID`, or zero job cards means
-   **blocked**. Report *"Indeed: blocked this run"* and move on.
-   ⛔ **Never invent, guess, or "reconstruct" Indeed listings.** A challenge or
-   empty page means **zero** results — say exactly that.
-4. Extract the cards with the browser JS in
-   `references/indeed-browser.md` (the `jk` query param is the dedup key).
-5. Push them through the pipeline:
+- `job_status` shows which backend is active and what each board needs.
+- `JOBREACH_BACKEND=scrapling|playwright` pins one (useful when a board breaks
+  on one backend only); `JOBREACH_SCRAPLING_PYTHON` points at an interpreter
+  that has Scrapling, if auto-detection missed it.
+- Wantedly needs no browser at all, so it keeps working even when the browser
+  stack is missing — if a search fails only on Indeed/Mynavi, that is why.
 
-   ```
-   job_ingest(jobs=[{title, company, location, url}, ...])
-   ```
+## Indeed Japan
 
-   They then share the store, the "new" flag, and the note format with every
-   scraped board.
+Indeed is scraped by the plugin (stealth browser). Three things make its output
+trustworthy, and all three are enforced in code:
+
+- the URL always carries `&hl=ja`, and a response from `www.indeed.com` is a
+  hard failure — those would be American listings;
+- `jk` (the listing id) is the dedup key, so re-runs do not re-report;
+- a Cloudflare challenge is reported as **blocked**, never as "no jobs".
+
+**When Indeed comes back blocked or empty,** fall back to fetching it yourself
+and pushing the cards through `job_ingest` — the full recipe, including the
+extraction script, is in `references/indeed.md`. Never invent, guess, or
+"reconstruct" listings: a blocked board means **zero** results, say exactly
+that, and move on.
+
+## Reading one listing in detail
+
+To summarise or evaluate a single listing, fetch its page with the Scrapling
+MCP tools (`stealthy_fetch` — the plugin's own stealth browser) and read the
+markdown; pass only the jobs the user cares about. Do not run a full search to
+answer a question about one URL the user already has.
 
 ## Monitoring
 
@@ -124,7 +131,7 @@ when the output actually changed, so an idle schedule costs nothing.
 
 ```
 job_cron(schedule="0 9 * * *", keyword="frontend engineer",
-         sources="wantedly,linkedin", deliver="telegram")
+         sources="wantedly,indeed", deliver="telegram")
 ```
 
 Then tell the user: the job only fires while the **Hermes gateway is running**
@@ -137,7 +144,7 @@ Then tell the user: the job only fires while the **Hermes gateway is running**
 ```json
 {
   "mode": "search",
-  "query": {"keyword": "engineer", "location": "tokyo", "sources": ["wantedly"]},
+  "query": {"keyword": "engineer", "location": "tokyo", "sources": ["wantedly", "indeed"]},
   "summary": {
     "total": 16, "new": 16, "saved": 16, "shown": 5,
     "by_platform": {"wantedly": {"total": 16, "new": 16}},
@@ -146,7 +153,7 @@ Then tell the user: the job only fires while the **Hermes gateway is running**
   "jobs": [
     {"title": "…", "company": "…", "url": "…", "location": "…",
      "source_platform": "wantedly", "source_label": "Wantedly",
-     "salary": null, "is_new": true, "scraped_at": "…"}
+     "salary": null, "is_new": true, "scraped_at": "…", "posted_at": "…"}
   ]
 }
 ```
@@ -156,6 +163,8 @@ Then tell the user: the job only fires while the **Hermes gateway is running**
 - `summary.errors` maps a failed board → reason. **A partial failure still
   returns the boards that succeeded** — report the failure, keep the results.
 - `jobs` is ordered new-first, then by board and title.
+- `posted_at` is the board's publication date when it exposes one (Wantedly
+  does; Indeed and Mynavi do not — it stays `null`).
 
 ## How "new" tracking works
 
@@ -171,6 +180,7 @@ correct, not a bug. Use `new_only: true` to surface only fresh listings, or
 |------|------|
 | Design jobs in Tokyo (the default feed) | `job_search()` |
 | Engineer roles, Wantedly only, top 10 | `job_search(keyword="engineer", sources=["wantedly"], limit=10)` |
+| Widest net for one query | `job_search(keyword="データサイエンティスト", sources=["wantedly", "indeed"])` |
 | Only what is new since last check | `job_search(keyword="…", new_only=True)` |
 | Throwaway search, do not persist | `job_search(keyword="UX researcher", save=False)` |
 | Clean up noisy results | `job_search(keyword="designer", validation="local", profile="designer")` |
@@ -180,14 +190,14 @@ correct, not a bug. Use `new_only: true` to surface only fresh listings, or
 
 ## Pitfalls
 
-1. **Treating a 30–90 s scrape as a hang.** Playwright is launching a real
-   browser against live sites. Do not re-issue the search.
+1. **Treating a 30–90 s scrape as a hang.** Two boards drive a real browser
+   against live sites. Do not re-issue the search.
 2. **Reading `new: 0` as failure.** It means nothing changed since the last
    run. Check `summary.total` for how many currently match.
 3. **Routing a general keyword to Mynavi.** It is occupation-code,
-   new-graduate, design-only, and ignores location. Use Wantedly.
-4. **Using `job_search` for Indeed.** It will reject `indeed` with an
-   explanation; that is intentional. Use `job_ingest`.
+   new-graduate, design-only, and ignores location. Use Wantedly or Indeed.
+4. **Assuming Wantedly is broken when the browser stack is.** It is HTTP-only;
+   a Wantedly failure is a network/API problem, not a missing browser.
 5. **Fabricating listings.** A blocked or empty board means zero results.
    Report it as blocked/empty. This is the single worst failure mode here.
 6. **Skipping `job_note`.** The note is the deliverable that survives the chat.
@@ -197,15 +207,17 @@ correct, not a bug. Use `new_only: true` to surface only fresh listings, or
    Hermes gateway process. If it is stopped, nothing fires.
 9. **Expecting LinkedIn to work without Chrome.** `opencli linkedin whoami`
    must succeed first; if it hangs, Chrome is not running.
+10. **Pinning a backend and leaving it pinned.** `JOBREACH_BACKEND` is a
+    debugging tool; `auto` is the right setting in normal use.
 
 ## Verification checklist
 
 - [ ] Reported counts match the envelope (`total`, `new`, `shown`).
 - [ ] Every board in `summary.errors` was acknowledged to the user.
-- [ ] A general keyword search used `sources` including `wantedly`.
+- [ ] A general keyword search used `sources` beyond the Mynavi default.
 - [ ] Fresh listings were flagged as new, and the note was written when the
       user wanted a saved artefact.
-- [ ] Indeed (if requested): a **real browser** was used, the page was verified
-      not to be a Cloudflare challenge, and any blocked run was reported as
-      blocked rather than filled in.
+- [ ] Indeed (if requested): a blocked run was reported as blocked rather than
+      filled in, and no US listings (`www.indeed.com`) were presented as Tokyo
+      jobs.
 - [ ] If a scrape appeared to hang: it was given at least two minutes.

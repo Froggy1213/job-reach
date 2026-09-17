@@ -150,5 +150,12 @@ class Sources:
 
     @property
     def scraped(self) -> tuple[str, ...]:
-        """Boards that actually have a scraper (everything except Indeed)."""
-        return tuple(name for name in self.names if name != "indeed")
+        """Boards that have a scraper (every board the plugin ships today).
+
+        Boards without one used to be listed in the scrapers package's
+        ``INGEST_ONLY``; nothing needs ingesting-only today, but the hook stays
+        so a future board can be marked that way in one place.
+        """
+        from .scrapers import INGEST_ONLY
+
+        return tuple(name for name in self.names if name not in INGEST_ONLY)
