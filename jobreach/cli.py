@@ -74,6 +74,10 @@ def build_parser() -> argparse.ArgumentParser:
                             help="relevance filter: 'local' is free, 'llm' needs an API key")
     search_cmd.add_argument("--profile", default="designer",
                             help="filter profile: designer, frontend, engineering, product, any")
+    search_cmd.add_argument("--llm-model", default=None,
+                            help="model for --validate llm (default: implied by the API key found)")
+    search_cmd.add_argument("--llm-base-url", default=None,
+                            help="OpenAI-compatible endpoint for --validate llm")
     search_cmd.add_argument("--json", action="store_true", help="emit JSON on stdout")
     search_cmd.add_argument("--db", default=None, help="path to the SQLite database")
 
@@ -120,6 +124,8 @@ def build_parser() -> argparse.ArgumentParser:
     monitor_cmd.add_argument("-s", "--source", default="wantedly,linkedin",
                              help="boards to watch (default: wantedly,linkedin)")
     monitor_cmd.add_argument("--profile", default="designer")
+    monitor_cmd.add_argument("--llm-model", default=None)
+    monitor_cmd.add_argument("--llm-base-url", default=None)
     monitor_cmd.add_argument("--validate", choices=["off", "local", "llm"], default="local")
     monitor_cmd.add_argument("--db", default=None)
 
@@ -189,6 +195,27 @@ def main(argv: Sequence[str] | None = None) -> int:
 # --------------------------------------------------------------------------- #
 
 
+def _preflight(sources: Sources) -> None:
+    """Fail fast when *no* selected board can possibly run.
+
+    Without this, a missing browser stack means every Playwright board retries
+    its navigation three times before reporting the same error — minutes of
+    waiting for an answer we already knew. Crucially this only aborts when
+    *every* scrapable board is blocked: a mixed selection still runs, so a
+    working board is never sacrificed to a broken one.
+    """
+    from .errors import ConfigError
+    from .scrapers import check_source_requirements
+
+    requested = list(sources.scraped)
+    if not requested:
+        return
+    blocked = check_source_requirements(requested)
+    if blocked and len(blocked) == len(requested):
+        board = next(iter(blocked))
+        raise ConfigError(f"no selected board can run:\n{blocked[board]}")
+
+
 def _cmd_search(args: argparse.Namespace) -> int:
     request = SearchRequest(
         keyword=args.keyword,
@@ -201,7 +228,10 @@ def _cmd_search(args: argparse.Namespace) -> int:
         timeout_ms=args.timeout_ms,
         validation=args.validate,
         validation_profile=args.profile,
+        llm_model=args.llm_model,
+        llm_base_url=args.llm_base_url,
     )
+    _preflight(request.sources)
     repository = open_db(args.db)
     try:
         result = asyncio.run(search(request, repository))
@@ -344,7 +374,10 @@ def _cmd_monitor(args: argparse.Namespace) -> int:
         save=True,
         validation=args.validate,
         validation_profile=args.profile,
+        llm_model=args.llm_model,
+        llm_base_url=args.llm_base_url,
     )
+    _preflight(request.sources)
     repository = open_db(args.db)
     try:
         result = asyncio.run(search(request, repository))

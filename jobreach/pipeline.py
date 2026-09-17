@@ -54,6 +54,12 @@ class SearchRequest:
     #: ``"off"``, ``"local"`` or ``"llm"``.
     validation: str = "off"
     validation_profile: str = "designer"
+    #: LLM provider overrides for ``validation="llm"``. ``None`` resolves from
+    #: the environment, which keeps the key, the endpoint and the model
+    #: describing the same provider instead of sending one vendor's key to
+    #: another vendor's host.
+    llm_model: str | None = None
+    llm_base_url: str | None = None
 
 
 async def search(
@@ -171,7 +177,11 @@ def _finish(
             for job in jobs
         ]
         outcome = filter_jobs(
-            payload, profile=request.validation_profile, mode=request.validation
+            payload,
+            profile=request.validation_profile,
+            mode=request.validation,
+            base_url=request.llm_base_url,
+            model=request.llm_model,
         )
         keep_urls = {record["url"] for record in outcome.kept}
         jobs = [job for job in jobs if job.url in keep_urls]
@@ -290,6 +300,8 @@ def run_search(
     timeout_ms: int = 30_000,
     validation: str = "off",
     validation_profile: str = "designer",
+    llm_model: str | None = None,
+    llm_base_url: str | None = None,
     db: str | Path | None = None,
 ) -> dict[str, Any]:
     """Synchronous façade over :func:`search` — one call, connection managed."""
@@ -304,6 +316,8 @@ def run_search(
         timeout_ms=timeout_ms,
         validation=validation,
         validation_profile=validation_profile,
+        llm_model=llm_model,
+        llm_base_url=llm_base_url,
     )
     repository = open_db(db)
     try:

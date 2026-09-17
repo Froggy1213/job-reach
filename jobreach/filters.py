@@ -24,7 +24,9 @@ import json
 import os
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -254,6 +256,99 @@ def local_match(title: str, profile: str) -> Decision:
 # LLM strategy
 # --------------------------------------------------------------------------- #
 
+#: Env vars that carry an API key, in precedence order, each with the endpoint
+#: and model that key implies. ``None`` means "this var names no provider" — a
+#: generic key is useless without an explicit base URL, and guessing DeepSeek
+#: for it is how you end up posting an OpenAI key to the wrong host and getting
+#: a 401 that reads like an auth bug rather than a configuration one.
+_KEY_SOURCES: tuple[tuple[str, str | None, str | None], ...] = (
+    ("JOBREACH_LLM_API_KEY", None, None),
+    ("DEEPSEEK_API_KEY", "https://api.deepseek.com/v1", "deepseek-chat"),
+    ("OPENAI_API_KEY", "https://api.openai.com/v1", "gpt-4o-mini"),
+)
+
+#: Endpoint used when only a base URL is configured without a key source.
+_FALLBACK_MODEL = "gpt-4o-mini"
+
+
+@dataclass(frozen=True, slots=True)
+class LlmSettings:
+    """A coherent (key, endpoint, model) triple, plus where the key came from."""
+
+    api_key: str
+    base_url: str
+    model: str
+    key_source: str
+
+    @property
+    def endpoint_host(self) -> str:
+        """Host only — safe to log and to show the user."""
+        return urllib.parse.urlparse(self.base_url).netloc or self.base_url
+
+
+def resolve_llm_settings(
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    model: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> LlmSettings:
+    """Resolve which provider to call, keeping key, endpoint and model consistent.
+
+    Precedence for each field is explicit argument → environment → the default
+    implied by whichever key was found, so ``OPENAI_API_KEY` alone talks to
+    OpenAI rather than to DeepSeek with the wrong credentials.
+
+    Raises:
+        FilterError: no key is configured, or a generic key was given without an
+            endpoint to send it to.
+    """
+    source = env if env is not None else os.environ
+    key_source = ""
+    key = api_key or ""
+    implied_url: str | None = None
+    implied_model: str | None = None
+    if not key:
+        for name, provider_url, provider_model in _KEY_SOURCES:
+            value = (source.get(name) or "").strip()
+            if value:
+                key, key_source = value, name
+                implied_url, implied_model = provider_url, provider_model
+                break
+
+    if not key:
+        names = ", ".join(name for name, _, _ in _KEY_SOURCES)
+        raise FilterError(
+            f"llm validation needs an API key: set one of {names}, "
+            "or use validation='local' (free, regex heuristics)"
+        )
+
+    resolved_url = (
+        base_url
+        or (source.get("JOBREACH_LLM_BASE_URL") or "").strip()
+        or (source.get("DEEPSEEK_BASE_URL") or "").strip()
+        or implied_url
+    )
+    if not resolved_url:
+        raise FilterError(
+            f"{key_source or 'the supplied key'} does not imply an API endpoint. "
+            "Set JOBREACH_LLM_BASE_URL (e.g. https://api.openai.com/v1) and, if "
+            "it is not OpenAI-compatible by default, JOBREACH_LLM_MODEL."
+        )
+
+    resolved_model = (
+        model
+        or (source.get("JOBREACH_LLM_MODEL") or "").strip()
+        or implied_model
+        or _FALLBACK_MODEL
+    )
+    return LlmSettings(
+        api_key=key,
+        base_url=resolved_url.rstrip("/"),
+        model=resolved_model,
+        key_source=key_source or "argument",
+    )
+
 
 def llm_filter(
     jobs: list[dict[str, Any]],
@@ -261,31 +356,29 @@ def llm_filter(
     *,
     api_key: str | None = None,
     base_url: str | None = None,
-    model: str = "deepseek-chat",
+    model: str | None = None,
     batch_size: int = 10,
     timeout: float = 60.0,
 ) -> tuple[list[Decision], dict[str, Any]]:
     """Classify *jobs* through an OpenAI-compatible endpoint, in batches.
 
-    The API key is read from ``JOBREACH_LLM_API_KEY``, ``DEEPSEEK_API_KEY``,
-    then ``OPENAI_API_KEY``. Any batch that fails falls back to
-    :func:`local_match`, so one bad request cannot lose a whole scrape.
+    Provider selection is delegated to :func:`resolve_llm_settings`, so the key,
+    the endpoint and the model always describe the same provider. Any batch that
+    fails falls back to :func:`local_match`, so one bad request cannot lose a
+    whole scrape.
     """
-    key = api_key or os.environ.get("JOBREACH_LLM_API_KEY") or os.environ.get(
-        "DEEPSEEK_API_KEY"
-    ) or os.environ.get("OPENAI_API_KEY")
-    if not key:
-        raise FilterError(
-            "llm validation needs an API key: set JOBREACH_LLM_API_KEY, "
-            "DEEPSEEK_API_KEY or OPENAI_API_KEY, or use validation='local'"
-        )
-    endpoint = (base_url or os.environ.get("JOBREACH_LLM_BASE_URL")
-                or os.environ.get("DEEPSEEK_BASE_URL")
-                or "https://api.deepseek.com/v1").rstrip("/")
+    settings = resolve_llm_settings(api_key=api_key, base_url=base_url, model=model)
     profile_prompt = FILTER_PROFILES.get(profile, profile)
 
     decisions: list[Decision] = []
-    stats = {"api_calls": 0, "fallbacks": 0, "mode": "llm", "model": model}
+    stats = {
+        "api_calls": 0,
+        "fallbacks": 0,
+        "mode": "llm",
+        "model": settings.model,
+        "endpoint": settings.endpoint_host,
+        "key_source": settings.key_source,
+    }
 
     for start in range(0, len(jobs), batch_size):
         batch = jobs[start : start + batch_size]
@@ -302,9 +395,9 @@ def llm_filter(
 
         try:
             payload = _chat_completion(
-                endpoint=endpoint,
-                key=key,
-                model=model,
+                endpoint=settings.base_url,
+                key=settings.api_key,
+                model=settings.model,
                 timeout=timeout,
                 messages=[
                     {"role": "system", "content": _SYSTEM_PROMPT},
@@ -382,9 +475,20 @@ def _chat_completion(
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:300]
-        raise FilterError(f"LLM endpoint returned HTTP {exc.code}: {detail}") from exc
+        auth_hint = ""
+        if exc.code in (401, 403):
+            # A 401 here almost always means the key belongs to a different
+            # provider than the endpoint, so name the endpoint explicitly.
+            auth_hint = (
+                " — the key was rejected by this endpoint. Check that the key "
+                "matches the provider: JOBREACH_LLM_BASE_URL and "
+                "JOBREACH_LLM_MODEL select which one is called."
+            )
+        raise FilterError(
+            f"{endpoint} returned HTTP {exc.code} for model {model!r}: {detail}{auth_hint}"
+        ) from exc
     except urllib.error.URLError as exc:
-        raise FilterError(f"LLM endpoint unreachable: {exc.reason}") from exc
+        raise FilterError(f"LLM endpoint {endpoint} unreachable: {exc.reason}") from exc
 
 
 # --------------------------------------------------------------------------- #
@@ -399,7 +503,7 @@ def filter_jobs(
     mode: str = "local",
     api_key: str | None = None,
     base_url: str | None = None,
-    model: str = "deepseek-chat",
+    model: str | None = None,
 ) -> FilterResult:
     """Split *jobs* into ``kept`` and ``rejected`` under *profile*.
 

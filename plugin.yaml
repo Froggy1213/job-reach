@@ -37,11 +37,13 @@ optional_env:
   - name: JOBREACH_LLM_API_KEY
     description: "Key for LLM-based relevance filtering (job_search with validation='llm'). Falls back to DEEPSEEK_API_KEY, then OPENAI_API_KEY."
   - name: JOBREACH_LLM_BASE_URL
-    description: "OpenAI-compatible base URL for LLM filtering. Default: https://api.deepseek.com/v1"
+    description: "OpenAI-compatible base URL for LLM filtering. Required when using the generic JOBREACH_LLM_API_KEY."
+  - name: JOBREACH_LLM_MODEL
+    description: "Model for LLM filtering. Defaults to the one implied by whichever API key was found."
   - name: DEEPSEEK_API_KEY
-    description: "Alternative key for LLM filtering."
+    description: "DeepSeek key for LLM filtering; implies api.deepseek.com and deepseek-chat."
   - name: OPENAI_API_KEY
-    description: "Alternative key for LLM filtering."
+    description: "OpenAI key for LLM filtering; implies api.openai.com and gpt-4o-mini."
 
 external_dependencies:
   - name: uv

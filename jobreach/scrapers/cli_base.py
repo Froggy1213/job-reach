@@ -22,6 +22,7 @@ from typing import Any
 from ..domain import JobPosting
 from ..errors import MissingDependencyError, ScraperError
 from ..logging_setup import get_logger
+from ..proc import run_captured
 from .base import BaseScraper
 
 logger = get_logger("scrapers.cli")
@@ -60,16 +61,17 @@ class CliScraper(BaseScraper):
         logger.info("running CLI scraper", extra={"command": " ".join(args)})
         try:
             proc = await asyncio.to_thread(
-                subprocess.run,
-                args,
-                capture_output=True,
-                text=True,
-                timeout=self.cli_timeout,
+                run_captured, args, timeout=self.cli_timeout
             )
         except subprocess.TimeoutExpired as exc:
             raise ScraperError(
                 f"{executable} timed out after {self.cli_timeout}s "
                 "(is the browser it drives actually running?)"
+            ) from exc
+        except FileNotFoundError as exc:
+            raise MissingDependencyError(
+                f"the {executable!r} command is not on PATH",
+                hint=self.install_hint or f"install {executable} and try again",
             ) from exc
 
         if proc.returncode != 0:

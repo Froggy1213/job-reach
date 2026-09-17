@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from jobreach.domain import SourcePlatform
-from jobreach.errors import ScraperError
+from jobreach.errors import MissingDependencyError, ScraperError
 from jobreach.scrapers import (
     SCRAPERS,
     available_sources,
@@ -52,13 +52,42 @@ def test_linkedin_is_the_only_cli_board():
 
 
 def test_requirements_report_missing_playwright(monkeypatch: pytest.MonkeyPatch):
-    """Without the scraping extra, browser boards report a problem — not a crash."""
-    monkeypatch.setattr(
-        "jobreach.scrapers.base.require_playwright",
-        lambda: (_ for _ in ()).throw(ImportError("nope")),
-    )
+    """Without the scraping extra, browser boards report a problem — not a crash.
+
+    The probe is patched at its **definition site** (``scrapers.base``), which is
+    the only place it is looked up: ``check_source_requirements`` calls it
+    through the module precisely so that seam exists. Patching a name imported
+    into ``scrapers/__init__`` would silently do nothing, and this test would
+    then only pass on machines where playwright happens to be absent.
+    """
+
+    def _missing():
+        raise MissingDependencyError("no playwright here", hint="run setup")
+
+    monkeypatch.setattr("jobreach.scrapers.base.require_playwright", _missing)
     problems = check_source_requirements(["wantedly", "mynavi2027", "linkedin"])
     assert set(problems) == {"wantedly", "mynavi2027"}
+    assert "run setup" in problems["wantedly"]
+
+
+def test_requirements_are_clean_when_the_browser_stack_is_present(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The mirror case, so the test above cannot pass for the wrong reason."""
+    monkeypatch.setattr(
+        "jobreach.scrapers.base.require_playwright", lambda: (object(), object())
+    )
+    assert check_source_requirements(["wantedly", "mynavi2027", "linkedin"]) == {}
+
+
+def test_requirements_skip_cli_boards_entirely(monkeypatch: pytest.MonkeyPatch):
+    """LinkedIn needs no browser, so it must never be probed for one."""
+
+    def _explode():  # pragma: no cover - would fail the test if called
+        raise AssertionError("CLI boards must not trigger a Playwright probe")
+
+    monkeypatch.setattr("jobreach.scrapers.base.require_playwright", _explode)
+    assert check_source_requirements(["linkedin"]) == {}
 
 
 # --- relevance matching ----------------------------------------------------

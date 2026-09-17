@@ -15,7 +15,8 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from ..domain import SourcePlatform
-from .base import BaseScraper, require_playwright
+from . import base
+from .base import BaseScraper
 from .cli_base import CliScraper
 from .linkedin import LinkedInScraper
 from .mynavi2027 import Mynavi2027Scraper
@@ -93,11 +94,18 @@ def build_scrapers(
 def check_source_requirements(names: list[str] | tuple[str, ...]) -> dict[str, str]:
     """Report which requested boards cannot run in this interpreter.
 
-    Used by ``jobreach doctor`` and the ``job_doctor`` Hermes tool to fail
-    loudly *before* a scrape instead of halfway through one.
+    Called by the CLI before a search so a missing browser stack fails
+    immediately with a fix, instead of after every board has timed out.
+
+    The probe is reached through the :mod:`~jobreach.scrapers.base` module
+    rather than a name imported into this one, so the browser check has exactly
+    one interception point — ``base.require_playwright``. Binding the function
+    directly here would silently ignore a patch applied at its definition site.
 
     Returns:
         Mapping of board name → human-readable problem. Empty means all good.
+        Boards served by an external CLI are never included: they need no
+        browser.
     """
     problems: dict[str, str] = {}
     browser_boards = [
@@ -108,7 +116,7 @@ def check_source_requirements(names: list[str] | tuple[str, ...]) -> dict[str, s
     if not browser_boards:
         return problems
     try:
-        require_playwright()
+        base.require_playwright()
     except Exception as exc:  # noqa: BLE001 — the hint is the whole point
         hint = getattr(exc, "hint", "") or str(exc)
         for name in browser_boards:

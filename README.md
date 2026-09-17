@@ -188,7 +188,10 @@ Everything is optional; see `.env.example`.
 | `JOBREACH_DB` | Explicit database path. |
 | `JOBREACH_PYTHON` | Interpreter used to run the engine. |
 | `OBSIDIAN_VAULT_PATH` | Vault for generated notes (auto-detected otherwise). |
-| `JOBREACH_LLM_API_KEY` | Key for `validation="llm"` (falls back to `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`). |
+| `JOBREACH_LLM_API_KEY` | Generic key for `validation="llm"`. Requires `JOBREACH_LLM_BASE_URL`. |
+| `JOBREACH_LLM_BASE_URL` | OpenAI-compatible endpoint for `validation="llm"`. |
+| `JOBREACH_LLM_MODEL` | Model for `validation="llm"`; defaults to the one implied by the key found. |
+| `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` | Provider keys that imply their own endpoint and model. |
 
 ---
 

@@ -36,6 +36,7 @@ from typing import Any
 from . import __version__
 from .config import jobreach_home, plugin_dir, python_override
 from .logging_setup import get_logger
+from .proc import run_captured
 from .scrapers.base import PLAYWRIGHT_HINT
 
 logger = get_logger("runtime")
@@ -46,6 +47,14 @@ SCRAPE_PACKAGES = ("playwright", "playwright-stealth")
 #: Python version requested when creating the venv. 3.11 is the floor declared
 #: in ``pyproject.toml`` and has the widest prebuilt-wheel coverage.
 VENV_PYTHON = "3.11"
+
+#: Ceilings for the one-time setup steps. Chromium is a ~150 MB download, so it
+#: gets the most room; the point is that a stalled transfer eventually fails
+#: with a message instead of hanging the agent forever.
+UV_VENV_TIMEOUT = 300.0
+PIP_TIMEOUT = 600.0
+BROWSER_DOWNLOAD_TIMEOUT = 1800.0
+SMOKE_TEST_TIMEOUT = 120.0
 
 
 # --------------------------------------------------------------------------- #
@@ -125,16 +134,21 @@ def run_engine(
     timeout: float = 600.0,
     stdin: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run the engine CLI and capture its output. Never raises on exit code."""
+    """Run the engine CLI and capture its output. Never raises on exit code.
+
+    Uses :func:`jobreach.proc.run_captured` rather than ``subprocess.run`` so a
+    timeout tears down the engine's **whole process tree**. The engine starts
+    Playwright, which starts a Node driver, which starts Chromium; killing only
+    the Python child would leave the browser running, and a monitoring cron job
+    that hits this repeatedly would accumulate orphans.
+    """
     argv = [*engine_argv(), *args]
     logger.debug("running engine", extra={"argv": argv})
-    return subprocess.run(
+    return run_captured(
         argv,
-        capture_output=True,
-        text=True,
-        input=stdin,
         timeout=timeout,
-        cwd=str(plugin_dir()),
+        stdin=stdin,
+        cwd=plugin_dir(),
         env=engine_env(),
     )
 
@@ -194,13 +208,11 @@ def setup_runtime(*, with_browser: bool = True, force: bool = False) -> SetupRep
             return report
         if force and target.exists():
             shutil.rmtree(target, ignore_errors=True)
-        result = subprocess.run(
-            [uv, "venv", "--python", VENV_PYTHON, str(target)],
-            capture_output=True,
-            text=True,
+        ok, detail = _setup_step(
+            [uv, "venv", "--python", VENV_PYTHON, str(target)], UV_VENV_TIMEOUT
         )
-        if result.returncode != 0:
-            report.add("venv", False, (result.stderr or result.stdout).strip()[:500])
+        if not ok:
+            report.add("venv", False, detail)
             return report
         report.add("venv", True, f"created at {target} (python {VENV_PYTHON})")
 
@@ -210,28 +222,22 @@ def setup_runtime(*, with_browser: bool = True, force: bool = False) -> SetupRep
         return report
     report.venv = str(python)
 
-    result = subprocess.run(
+    ok, detail = _setup_step(
         [uv or "uv", "pip", "install", "--python", str(python), *SCRAPE_PACKAGES],
-        capture_output=True,
-        text=True,
+        PIP_TIMEOUT,
     )
-    if result.returncode != 0:
-        report.add("scraping extra", False, (result.stderr or result.stdout).strip()[:500])
+    if not ok:
+        report.add("scraping extra", False, detail)
         return report
     report.add("scraping extra", True, ", ".join(SCRAPE_PACKAGES))
 
     if with_browser:
-        result = subprocess.run(
+        ok, detail = _setup_step(
             [str(python), "-m", "playwright", "install", "chromium"],
-            capture_output=True,
-            text=True,
+            BROWSER_DOWNLOAD_TIMEOUT,
         )
-        if result.returncode != 0:
-            report.add(
-                "chromium",
-                False,
-                (result.stderr or result.stdout).strip()[:500],
-            )
+        if not ok:
+            report.add("chromium", False, detail)
             report.hint = (
                 "The venv is ready but Chromium is missing. Re-run "
                 "`hermes job-reach setup`, or install it manually:\n"
@@ -242,19 +248,38 @@ def setup_runtime(*, with_browser: bool = True, force: bool = False) -> SetupRep
     else:
         report.add("chromium", True, "skipped (--no-browser)")
 
-    probe = subprocess.run(
+    ok, detail = _setup_step(
         [str(python), "-m", "jobreach", "doctor", "--json"],
-        capture_output=True,
-        text=True,
-        cwd=str(plugin_dir()),
+        SMOKE_TEST_TIMEOUT,
+        cwd=plugin_dir(),
         env=engine_env(),
     )
-    report.add(
-        "engine smoke test",
-        probe.returncode == 0,
-        (probe.stdout or probe.stderr).strip()[:300],
-    )
+    report.add("engine smoke test", ok, detail[:300])
     return report
+
+
+def _setup_step(
+    argv: list[str],
+    timeout: float,
+    *,
+    cwd: str | Path | None = None,
+    env: dict[str, str] | None = None,
+) -> tuple[bool, str]:
+    """Run one setup command and turn any failure into a report line.
+
+    Setup talks to the network, so "it hung" and "it could not start" are as
+    likely as a non-zero exit. All three have to come back as a readable step
+    result instead of an exception escaping into the agent's tool call.
+    """
+    try:
+        result = run_captured(argv, timeout=timeout, cwd=cwd, env=env)
+    except subprocess.TimeoutExpired:
+        return False, f"timed out after {int(timeout)}s: {' '.join(argv)}"
+    except OSError as exc:
+        return False, f"could not start {argv[0]}: {exc}"
+    if result.returncode != 0:
+        return False, (result.stderr or result.stdout).strip()[:500]
+    return True, (result.stdout or "").strip()
 
 
 # --------------------------------------------------------------------------- #
@@ -271,11 +296,8 @@ def probe_browser_support(python: str, *, timeout: float = 60.0) -> tuple[bool, 
     Playwright would be a lie about what the engine can actually do.
     """
     try:
-        proc = subprocess.run(
-            [python, "-c", "import playwright, playwright_stealth"],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+        proc = run_captured(
+            [python, "-c", "import playwright, playwright_stealth"], timeout=timeout
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, f"could not run {python}: {exc}"

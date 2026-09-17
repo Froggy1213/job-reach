@@ -77,9 +77,12 @@ _SEARCH = {
                 "type": "string",
                 "enum": ["off", "local", "llm"],
                 "description": (
-                    "Relevance filter. 'local' = free regex heuristics, 'llm' = "
-                    "classify through an OpenAI-compatible API (needs an API key). "
-                    "Default 'off'."
+                    "Relevance filter. 'local' = free regex heuristics. 'llm' = "
+                    "classify through an OpenAI-compatible API; it needs a "
+                    "configured provider (DEEPSEEK_API_KEY or OPENAI_API_KEY), or "
+                    "JOBREACH_LLM_API_KEY plus JOBREACH_LLM_BASE_URL. A batch that "
+                    "fails degrades to the local filter rather than losing the "
+                    "search. Default 'off'."
                 ),
             },
             "profile": {
