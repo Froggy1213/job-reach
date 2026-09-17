@@ -1,129 +1,262 @@
-# Job Hunter Bot
+# Job Reach — a Hermes Agent plugin
 
-Async Telegram bot that aggregates job listings (design jobs in Tokyo) from Japanese job boards.
+Search Japanese job boards, remember what you have already seen, and get told
+only about what is new. Runs as a native [Hermes Agent](https://github.com/NousResearch/hermes-agent)
+plugin: seven LLM-callable tools, one skill, and scheduled monitoring through
+`hermes cron`.
 
-## Features
+---
 
-- **Asynchronous Scraping**: Efficiently scrapes multiple job boards concurrently.
-- **Modular Architecture**: Built with clean architecture principles using Strategy and Repository patterns.
-- **Easy Extensibility**: Simple process to add new job board sources.
+## From manual research to agent support
+
+The first version of this project was a **manual research tool**. You opened
+Telegram, typed `/jobs wantedly`, and the bot fetched listings and sent them
+back. The research stayed yours: you chose what to search, you read the cards,
+you remembered what you had already seen. An agent could only reach it through a
+shim — `hermes.py` hard-coded an absolute project path — driven by a shell
+wrapper that had to strip `VIRTUAL_ENV` first, because Hermes' Python and the
+project's Python fought over `pydantic_core`.
+
+This version makes the opposite bet: **the agent is the operator**, and the
+repository's job is to be good at being operated. That changes what "good" means
+at every layer:
+
+- **The interface is read by a model, not typed by a person.** Each tool schema
+  has to carry the knowledge needed to choose correctly: which board answers
+  which query, that Mynavi is new-grad design only and ignores location, that
+  Indeed Japan is ingest-only, that a scrape takes 30–90 seconds and must not be
+  retried in a loop. That prose is the product, not decoration.
+- **Output is a contract.** Every tool returns a stable JSON envelope
+  (`summary`, `jobs[]`, `is_new`); `--json` writes nothing but JSON to stdout
+  while logs go to stderr; `is_new` makes "what changed?" a field instead of a
+  judgement call.
+- **Failures are instructions.** A failed board returns
+  `{"success": false, "error": …, "hint": …}` where the hint is the exact
+  command that fixes it, and one broken board never discards the others.
+  Handlers never raise — a stack trace is useless to a model.
+- **The tool may not break its host.** The engine imports nothing outside the
+  standard library, so it loads cleanly into Hermes' own runtime (Python 3.14)
+  and can never take down the agent it serves. Playwright, the one heavy
+  dependency, lives in a separate venv and is driven over a subprocess.
+- **Knowledge lives in the repository, not in someone's head.** A skill whose
+  `description` is its trigger, plus `references/` for procedures too long for a
+  tool description — the Indeed browser recipe, the board-by-board caveats.
+- **Scheduling belongs to the host.** `job_cron` creates a real `hermes cron`
+  job in monitor mode, so the boards are polled cheaply and the model only wakes
+  when the output actually changed. Delivery goes through the gateway you
+  already use, to whichever chat platform you already use.
+
+The boards, the scrapers, the hard-won markup workarounds and the
+"new since last run" semantics are unchanged — they were the valuable part. What
+changed is who they are for. The bot is gone; the research is now something you
+ask for rather than something you perform.
+
+---
+
+## What changed
+
+| Removed | Replaced by |
+|---------|-------------|
+| `aiogram` Telegram bot (`bot/`, `main.py`) | Hermes gateway — the agent answers wherever you already talk to it |
+| APScheduler periodic scrape | `hermes cron` in monitor mode (`job_cron`) |
+| `services/notifier.py`, subscribers table | `deliver` targets on the cron job |
+| `config/settings.py` (required `BOT_TOKEN`) | `jobreach/config.py` — zero required configuration |
+| `hermes.py` shim with a hard-coded project path | `tools.py` + `jobreach/runtime.py`, path-agnostic |
+| `search_cli.py` + a bash wrapper in `~/.hermes/skills/` | `jobreach/cli.py`, and a skill that ships with the plugin |
+| SQLAlchemy + aiosqlite + pydantic + httpx | `sqlite3`, dataclasses, `urllib` |
+| Docker / Compose deployment | `hermes plugins install` |
+
+---
+
+## What it does
+
+| Board | Keyword search | Location | How it is fetched |
+|-------|----------------|----------|-------------------|
+| **Wantedly** | ✅ server-side | ✅ slug (`tokyo`, `osaka`, `any`) | Playwright |
+| **Mynavi 2027** | ⚠️ best-effort | ❌ ignored | Playwright, by occupation code |
+| **LinkedIn** | ✅ server-side | ✅ | `opencli` CLI (your logged-in Chrome) |
+| **Indeed Japan** | n/a | n/a | **No scraper** — the agent fetches with a real browser and feeds it in |
+
+Every listing is keyed by its normalised URL in a local SQLite store, so each
+run reports genuine changes instead of the same cards again.
+
+---
+
+## Install
+
+```bash
+hermes plugins install Froggy1213/job-reach --enable
+hermes job-reach setup          # one-time: venv + Playwright + Chromium (~150 MB)
+hermes job-reach doctor         # verify
+```
+
+`setup` also copies the bundled skill into `~/.hermes/skills/productivity/job-reach/`
+so it can auto-trigger. You can equally just ask the agent to *"run job_setup"*.
+
+Then:
+
+```
+find design jobs in Tokyo
+```
+
+…or from the shell:
+
+```bash
+hermes job-reach search --keyword "frontend engineer" --source wantedly -n 10
+```
+
+---
+
+## The tools
+
+| Tool | Purpose |
+|------|---------|
+| `job_search` | Live scrape of the selected boards; returns a structured envelope. |
+| `job_ingest` | **The only way Indeed Japan listings enter the store.** |
+| `job_list` | Read what is already stored — no network. |
+| `job_note` | Render a result into an Obsidian Markdown note. |
+| `job_status` | Store counts, last run, and which boards can actually run. |
+| `job_setup` | One-time runtime install (venv, Chromium, skill). |
+| `job_cron` | Schedule recurring monitoring through `hermes cron`. |
+
+Plus a `/jobs <keyword>` slash command and a `hermes job-reach …` CLI that
+exposes the same engine to a human.
+
+---
 
 ## Architecture
 
 ```
-main.py                          ← Composition root (DI wiring)
-├── config/settings.py           ← Pydantic Settings from .env
-├── core/                        ← Infrastructure (exceptions, logging, DI container)
-├── models/                      ← Domain models (JobPosting, SourcePlatform)
-├── database/                    ← Repository pattern over SQLAlchemy async
-│   ├── repository.py            ← JobRepository ABC
-│   └── sqlalchemy_repository.py ← Concrete implementation
-├── scrapers/                    ← Strategy pattern
-│   ├── base.py                  ← BaseScraper ABC
-│   ├── orchestrator.py          ← Runs scrapers in parallel, deduplicates
-│   └── implementations/         ← One file per job board
-└── bot/                         ← aiogram v3 handlers & middleware
+plugin.yaml                  Hermes manifest (tools, env, capability hints)
+__init__.py                  register(ctx): tools + skill + commands
+schemas.py                   tool schemas — the contract the model sees
+tools.py                     thin async handlers; spawn the engine, return JSON
+skills/job-search/           SKILL.md + references/ (the agent's playbook)
+jobreach/                   the engine — standard library only
+├── domain.py                SourcePlatform, JobPosting (frozen dataclass)
+├── store.py                 JobRepository port + SQLite adapter
+├── filters.py               relevance profiles (regex heuristics / LLM)
+├── scrapers/                one strategy per board
+├── pipeline.py              search · ingest · dedupe · persist · report
+├── notes.py                 Obsidian rendering
+├── runtime.py               interpreter resolution + one-time setup
+├── install.py               skill/cron installation
+└── cli.py                   the `jobreach` command line
 ```
 
-### Key design decisions
+### Three decisions worth explaining
 
-- **Strategy pattern**: Each job board is one scraper class. The orchestrator treats them polymorphically.
-- **Repository pattern**: Application code works with `JobPosting` domain models; SQLAlchemy is an implementation detail.
-- **Manual DI**: No framework — all wiring is explicit in `main.py`.
-- **Immutable domain model**: `JobPosting` is frozen after construction.
-- **Single `SourcePlatform` enum**: Shared by models, ORM, scrapers, and bot — add a member here when adding a new board.
+**1. The engine is standard-library only.** `jobreach/` imports nothing
+outside the stdlib — no SQLAlchemy, no aiosqlite, no pydantic, no httpx. Hermes
+runs plugins inside its own runtime venv (Python 3.14 today), and an engine that
+needs binary wheels there is an engine that can break the agent. SQLite comes
+from `sqlite3`, validation is explicit dataclass checks, and the optional LLM
+filter uses `urllib.request`.
 
-## Setup
+**2. Tools run the engine in a subprocess, not in-process.** Scraping needs
+Playwright, which must never be installed into Hermes' own venv; and a scrape
+takes 30–90 seconds and several hundred MB of Chromium. A killable child
+process is easier to reason about than a blocked agent. The interpreter is
+resolved as `$JOBREACH_PYTHON` → the plugin venv → `sys.executable`, so the
+read-only tools work even before `setup` has run.
+
+**3. Messaging and scheduling belong to Hermes.** `job_cron` creates a real
+`hermes cron` job in **monitor mode**: the boards are polled cheaply every tick
+and the agent only wakes when the output actually changed. There is no second
+scheduler, no bot token, and delivery goes to Telegram/Discord/Slack/… through
+the gateway that already exists.
+
+### Where state lives
+
+```
+$HERMES_HOME/plugin-data/job-reach/
+├── jobs.db          listings, run history
+└── venv/            Playwright + Chromium (created by `setup`)
+```
+
+Never inside the plugin directory, so `hermes plugins update` cannot wipe it.
+
+---
+
+## Configuration
+
+Everything is optional; see `.env.example`.
+
+| Variable | Purpose |
+|----------|---------|
+| `JOBREACH_HOME` | Data directory. Default `$HERMES_HOME/plugin-data/job-reach`. |
+| `JOBREACH_DB` | Explicit database path. |
+| `JOBREACH_PYTHON` | Interpreter used to run the engine. |
+| `OBSIDIAN_VAULT_PATH` | Vault for generated notes (auto-detected otherwise). |
+| `JOBREACH_LLM_API_KEY` | Key for `validation="llm"` (falls back to `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`). |
+
+---
+
+## Command line
+
+```
+jobreach search    [-k KW] [-l LOC] [-s SOURCES] [-n N] [--new-only] [--json]
+jobreach ingest    [--file F] [--source S] [--json]        # JSON on stdin
+jobreach list      [-k TEXT] [-s SOURCE] [-n N] [--json]
+jobreach stats     [--json]
+jobreach note      [--input F] [--vault V]                 # envelope on stdin
+jobreach monitor   [-k KW] [-s SOURCES]                    # stable digest, for cron
+jobreach doctor    [--json]
+jobreach setup     [--force] [--no-browser]
+jobreach install-skill | install-cron
+```
+
+Logs always go to stderr, so `--json` output on stdout is safe to parse.
+
+---
+
+## Development
 
 ```bash
-# Install dependencies
-uv sync --dev
-
-# Install Playwright browser (needed for JS-rendered scrapers)
-uv run playwright install chromium
-
-# Copy and edit the environment file
-cp .env.example .env
-# Edit .env → paste your Telegram bot token from @BotFather
-
-# Run
-uv run python main.py
+uv run --python 3.12 --with pytest --with pyyaml --no-project python -m pytest
+hermes plugins validate .          # manifest + registration admission checks
+hermes plugins doctor . --ci       # real runtime contracts
 ```
 
-## Standalone search (no bot)
+The contract test loads `__init__.py` exactly the way Hermes does (as a package
+whose search path is the plugin directory) and pins the three things that fail
+silently otherwise: manifest ↔ registration, schema ↔ handler, and the
+"handlers always return JSON, never raise" rule.
 
-`search_cli.py` runs the same scrapers **without** the Telegram bot, token,
-or scheduler. It scrapes the selected boards, dedupes against the SQLite
-database, marks which listings are new since the last run, persists the new
-ones, and prints text or JSON. This is also what the `japan-job-search`
-Hermes skill (`~/.hermes/skills/productivity/japan-job-search/`) drives.
+### Re-syncing a working copy into Hermes
+
+`hermes plugins install` **copies** the repository into
+`~/.hermes/plugins/job-reach`, so local edits are not live until you re-copy
+them:
 
 ```bash
-# Default: design roles in Tokyo, both boards, readable output
-uv run python search_cli.py
-
-# Custom query + location, JSON, top 10 (new listings first)
-uv run python search_cli.py --keyword "frontend engineer" --location tokyo --json -n 10
-
-# Only Wantedly, only what's new since the last run
-uv run python search_cli.py --source wantedly --new-only
-
-# One-off search that must NOT persist to the DB
-uv run python search_cli.py --keyword "UX researcher" --no-save
+rsync -a --delete --exclude '.git/' --exclude '__pycache__/' \
+  --exclude '.pytest_cache/' --exclude '.ruff_cache/' \
+  ./ ~/.hermes/plugins/job-reach/
+hermes job-reach install-skill     # refresh the auto-discoverable skill copy
 ```
 
-Key flags: `--keyword/-k`, `--location/-l` (Wantedly slug; `any` disables),
-`--source/-s` (`wantedly`, `mynavi2027`, or `all`), `--limit/-n`,
-`--new-only`, `--no-save`, `--json`, `--headful`, `--db`, `--verbose`.
-Run `--help` for the full list.
+Restart Hermes afterwards — plugins are imported when a session starts.
 
-**Source note:** Wantedly is the general-purpose board (keyword + location
-go into its search URL). Mynavi 2027 is a new-grad, design-focused,
-nationwide board scraped by occupation code — it ignores `--location` and
-only best-effort-filters arbitrary keywords, so use `--source wantedly` for
-general searches.
+---
 
-### Ingest mode (Indeed & other browser-fetched listings)
+## What was kept
 
-Indeed Japan is behind Cloudflare and can't be scraped headless (the old bot
-got banned; direct requests return 403). But a **real browser passes the
-Cloudflare check** and serves full listings. So Indeed has **no scraper** —
-instead an agent (the Hermes `japan-job-search` skill) drives a real browser,
-extracts the cards, and pipes them into the **same** dedup / DB / new-flagging
-pipeline via `--ingest`:
+The pieces that were already right, and that this rewrite deliberately carried
+over unchanged in substance:
 
-```bash
-echo '[{"title":"Backend Engineer","company":"Acme","url":"https://jp.indeed.com/viewjob?jk=abc123","location":"Tokyo"}]' \
-  | uv run python search_cli.py --ingest --json
-```
+- the **strategy pattern** for boards — one class per site, one registry entry;
+- the **repository port** — the pipeline never sees SQL;
+- the **Playwright scrapers**, including every markup workaround and the comment
+  explaining why it exists (the company link being a sibling of the project
+  link, Mynavi's card text carrying the actual role);
+- the **local/LLM relevance profiles**, and the rule that a failing LLM batch
+  degrades to heuristics instead of losing a scrape;
+- the **Indeed browser-ingest workflow** — the one board where the honest answer
+  is "a real browser or nothing".
 
-Records are JSON (a list, or `{"jobs": [...]}`); each needs `title` + `url`
-(`company`, `location`, `salary`, `source_platform` optional — source
-defaults to `indeed`). Because Indeed's id lives in the `?jk=` query,
-`normalize_url` preserves query strings so listings don't collapse.
+---
 
-## Adding a new job board
+## License
 
-1. Add the platform to `models/enums.py` → `SourcePlatform`
-2. Create `scrapers/implementations/<board>_scraper.py` subclassing `BaseScraper`
-3. Register the instance in the `scrapers` list in `main.py`
-
-No other files need to change.
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `/start` | Welcome message and command list |
-| `/jobs` | List all scraped jobs (paginated) |
-| `/jobs <source>` | Filter by platform (e.g. `/jobs wantedly`) |
-| `/stats` | Job counts by platform |
-| `/subscribe` | Get notified about new jobs |
-| `/unsubscribe` | Stop notifications |
-| `/scrape` | Manually trigger scrape (admin only) |
-
-## Testing
-
-```bash
-uv run pytest -v
-```
+MIT

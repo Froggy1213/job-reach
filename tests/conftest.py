@@ -1,49 +1,39 @@
 """Shared test fixtures.
 
-Provides:
-- An in-memory SQLite repository for integration tests.
-- A Settings instance with fake tokens for unit tests.
+The plugin directory is put on ``sys.path`` so tests import ``jobreach`` the
+same way the subprocess-based tool layer does.
 """
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from config.settings import Settings
-from database.models import Base
-from database.sqlalchemy_repository import SQLAlchemyJobRepository
-
-
-@pytest.fixture
-def settings() -> Settings:
-    """Return a Settings instance with fake values for testing."""
-    return Settings(
-        BOT_TOKEN="0000000000:test_token_for_pytest",
-        DATABASE_URL="sqlite+aiosqlite:///./test_jobs.db",
-        LOG_LEVEL="WARNING",
-        PLAYWRIGHT_HEADLESS="true",
-        ADMIN_CHAT_ID=0,
-    )
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 
-@pytest.fixture
-async def repository():
-    """Create an in-memory SQLite repository with tables pre-created.
+@pytest.fixture()
+def data_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Isolate every test's runtime state from the developer's real ~/.hermes.
 
-    Each test that uses this fixture gets a fresh, empty database.
+    Both roots are redirected: ``HERMES_HOME`` (so skills/scripts/cron writes
+    land in the sandbox) and ``JOBREACH_HOME`` (the plugin's own state).
     """
-    engine = create_async_engine("sqlite+aiosqlite://", echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    hermes = tmp_path / "hermes-home"
+    home = tmp_path / "job-reach-data"
+    monkeypatch.setenv("HERMES_HOME", str(hermes))
+    monkeypatch.setenv("JOBREACH_HOME", str(home))
+    monkeypatch.delenv("JOBREACH_DB", raising=False)
+    monkeypatch.delenv("JOBREACH_PYTHON", raising=False)
+    monkeypatch.delenv("OBSIDIAN_VAULT_PATH", raising=False)
+    return home
 
-    session_factory = async_sessionmaker(
-        bind=engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
-    )
 
-    repo = SQLAlchemyJobRepository(session_factory)
-    yield repo
-
-    await engine.dispose()
+@pytest.fixture()
+def db_path(data_home: Path) -> Path:
+    """Path to a throwaway SQLite database."""
+    return data_home / "jobs.db"
