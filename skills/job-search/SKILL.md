@@ -206,6 +206,35 @@ correct, not a bug. Use `new_only: true` to surface only fresh listings, or
 | Save the last search to Obsidian | `job_note(result=<the envelope>)` |
 | New-grad design, Mynavi only | `job_search(sources=["mynavi2027"])` |
 
+## One note from several searches
+
+`job_note` renders a single envelope, so a multi-board, multi-keyword sweep scatters
+across several notes. For **one** consolidated note:
+
+1. run every search with `save: true` — the SQLite store becomes the source of truth;
+2. rebuild a merged envelope from the store (`~/.hermes/plugin-data/job-reach/jobs.db`,
+   table `jobs`: url/title/company/location/source_platform/salary/posted_at/first_seen_at/
+   last_seen_at — **no run id**, so filter `last_seen_at >= <session start>`), dropping
+   boards with no relevant rows, de-duplicating per board by (title, company) and
+   recomputing `summary.total`/`by_platform`; flag `is_new` only for rows first seen
+   after the session start, not for the whole day (known rows get their `last_seen_at`
+   bumped on re-scrape, so a date filter over-claims "new");
+3. render with the plugin's own writer so the format matches earlier notes:
+
+```bash
+cd ~/.hermes/plugins/job-reach
+~/.hermes/plugin-data/job-reach/venv/bin/python -m jobreach note \
+    --input /tmp/merged.json --vault ~/Obsidian/Adi --json
+```
+
+Use the plugin venv (or any interpreter ≥3.10): macOS' `/usr/bin/python3` is 3.9 and dies
+on `@dataclass(slots=True)` in `config.py`. Section headers come from
+`domain.PLATFORM_LABELS`, so every board reads properly (Green, Daijob, Japan Dev) — a
+lowercase board id in a header means the installed plugin copy is older than the repo;
+sync `jobreach/notes.py` from `~/My_projects/Job_reach`.
+Finish with a hand-written "read this first" block above the tables (direct hits for the
+user's exact ask, similar roles, per-board caveats): the tables alone are raw data.
+
 ## Pitfalls
 
 1. **Treating a 30–90 s scrape as a hang.** Two boards drive a real browser
@@ -233,6 +262,15 @@ correct, not a bug. Use `new_only: true` to surface only fresh listings, or
 12. **Expecting a board to honour every location.** Green and Daijob only know
     their own codes: an unmapped location means "no filter" (nationwide), and
     Mynavi ignores location entirely. Say so instead of implying a city filter.
+
+13. **Grepping the store by date to find "today's" rows.** `jobs` has no run id and a
+    re-scrape bumps `last_seen_at` of known rows, so filter by timestamp, not by date,
+    and check `runs` to find when the session actually started.
+14. **Expecting Daijob to honour a design keyword.** In practice its keyword search
+    returns recruiter/office noise for `グラフィックデザイナー` — verify a sample of
+    titles before believing a board matched, and drop the board from the note if it
+    did not. Likewise Green's keyword search is fuzzy: it returns sales/HR roles for
+    `DTP` and `グラフィックデザイナー`, so re-filter titles before reporting.
 
 ## Verification checklist
 
