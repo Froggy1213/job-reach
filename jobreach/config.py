@@ -28,13 +28,17 @@ PLUGIN_ID = "job-reach"
 DEFAULT_LOCATION = "tokyo"
 
 #: Boards enabled for a default (no-argument) search, in display order.
-#: Indeed is absent on purpose: it has no scraper (see ``SourcePlatform``).
+#: Indeed, Green, Daijob and Japan Dev are absent on purpose: the default is the
+#: project's original design-in-Tokyo feed, and every other board is a
+#: deliberate choice about *which* market to search.
 DEFAULT_SOURCES = ("wantedly", "mynavi2027", "linkedin")
 
 #: Where Obsidian notes are written, relative to the vault root.
 NOTE_SUBFOLDER = "job-searches"
 
-_VALID_SOURCES = ("wantedly", "mynavi2027", "linkedin", "indeed")
+_VALID_SOURCES = (
+    "wantedly", "mynavi2027", "linkedin", "indeed", "green", "daijob", "japandev",
+)
 
 #: Places searched for an Obsidian vault when none is configured.
 _VAULT_CANDIDATES = ("Obsidian/Adi", "Documents/Obsidian Vault", "Obsidian")
@@ -94,6 +98,18 @@ def python_override() -> str | None:
     return raw or None
 
 
+#: Source names accepted in addition to the canonical ones, so ``--source
+#: green-japan`` and ``--source mynavi`` mean what a person expects.
+_SOURCE_ALIASES: dict[str, str] = {
+    "greenjapan": "green",
+    "green-japan": "green",
+    "japan_dev": "japandev",
+    "japan-dev": "japandev",
+    "mynavi": "mynavi2027",
+    "mynavi_2027": "mynavi2027",
+}
+
+
 @dataclass(frozen=True, slots=True)
 class Sources:
     """Normalised, validated selection of job boards for one run.
@@ -119,7 +135,7 @@ class Sources:
         parts = value.split(",") if isinstance(value, str) else list(value)
         chosen: list[str] = []
         for part in parts:
-            name = str(part).strip().lower()
+            name = _SOURCE_ALIASES.get(str(part).strip().lower(), str(part).strip().lower())
             if not name:
                 continue
             if name in {"all", "*"}:

@@ -55,10 +55,15 @@ def test_doctor_json_reports_paths_and_backend(
     assert "job-reach setup" in payload["backend"]["hint"]
 
     boards = payload["boards"]
-    assert set(boards) == {"wantedly", "mynavi2027", "linkedin", "indeed"}
+    assert set(boards) == {
+        "wantedly", "indeed", "green", "daijob", "japandev", "mynavi2027", "linkedin",
+    }
     # Board readiness follows from what each board needs.
     assert boards["wantedly"]["needs_browser"] is False
     assert boards["wantedly"]["ready"] is True  # JSON over HTTP needs nothing
+    assert "JSON" in boards["wantedly"]["note"]
+    assert boards["green"]["needs_browser"] is False
+    assert boards["green"]["ready"] is True  # payload embedded in the page
     assert boards["indeed"]["needs_browser"] is True
     assert boards["indeed"]["ready"] is False  # …and there is no browser here
 

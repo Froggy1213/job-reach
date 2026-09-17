@@ -1,7 +1,7 @@
 ---
 name: job-search
 description: Find jobs on Japanese boards and track what is new.
-version: 2.1.0
+version: 2.2.0
 author: Froggy1213
 license: MIT
 platforms: [macos, linux]
@@ -53,20 +53,26 @@ development work). For non-Japanese boards use the relevant dedicated tool.
 
 | Board | Selector | Keyword | Location | Cost | Notes |
 |-------|----------|---------|----------|------|-------|
-| Wantedly | `wantedly` | ✅ server-side | ✅ slug | ~4 s | **The general-purpose board.** Read over its JSON API — no browser, any language. |
-| Indeed Japan | `indeed` | ✅ server-side | ✅ slug or 地名 | ~30 s | The widest market. Needs a stealth browser; the only board that can be bot-blocked. |
+| Wantedly | `wantedly` | ✅ server-side | ✅ slug | ~4 s | **The general-purpose board.** JSON API, any language, no browser. |
+| Green | `green` | ✅ server-side | ✅ slug/地名 | ~1 s | IT/Web industry. Salary is usually on the card. Payload embedded in the page. |
+| Daijob | `daijob` | ✅ server-side | ✅ slug (東京/大阪) | ~2 s | Bilingual and foreign-capital employers. Server-rendered HTML. |
+| Japan Dev | `japandev` | ⚠️ titles only | ❌ | ~1 s | English-speaking tech jobs. **The site ignores `?query=`** — the plugin filters titles itself, so Japanese keywords match nothing here. |
+| Indeed Japan | `indeed` | ✅ server-side | ✅ slug or 地名 | ~30 s | The widest market. Stealth browser; the only board that can be bot-blocked. |
 | Mynavi 2027 | `mynavi2027` | ⚠️ best-effort | ❌ ignored | ~1 min | New-graduate, design-only, nationwide, by occupation code. |
 | LinkedIn | `linkedin` | ✅ server-side | ✅ | ~20 s | Needs Chrome running with the OpenCLI extension. |
 
 **Rule of thumb:** for any general or non-design search
 (`"frontend engineer"`, `"marketing"`, `"データサイエンティスト"`) pass
-`sources: ["wantedly"]`, optionally adding `"indeed"` for coverage or
-`"linkedin"` for the English-speaking market. The default
+`sources: ["wantedly"]` plus `"green"` and/or `"daijob"` — all three are fast and
+browser-free. Add `"indeed"` for the widest net (it costs ~30 s), and
+`"japandev"` when the user wants English-speaking workplaces. The default
 (`wantedly, mynavi2027, linkedin`) is the design-in-Tokyo feed the project was
 built around; it is *not* the best choice for an arbitrary query.
 
 `location` accepts a slug (`tokyo`, `osaka`), a Japanese place name (`大阪`), or
-`any` for nationwide. Mynavi ignores it entirely.
+`any` for nationwide. Each board maps it to its own codes (Green uses prefecture
+ids, Daijob prefecture codes); a location a board does not know is ignored
+rather than wrong — and Mynavi ignores it entirely.
 
 ## Default flow
 
@@ -93,12 +99,14 @@ Scrapers never open a browser themselves — they hand a list of page steps to a
 | `scrapling` | Installed (the default) | Stealth browser, solves Cloudflare. Auto-detected; needs no download. |
 | `playwright` | Scrapling absent but the plugin venv exists | Built by `job_setup` (~150 MB Chromium). |
 
+Four of the seven boards need no browser at all (Wantedly, Green, Daijob, Japan
+Dev), so they keep working on a machine where the browser stack is missing — if
+a search fails only on Indeed/Mynavi, that is why.
+
 - `job_status` shows which backend is active and what each board needs.
 - `JOBREACH_BACKEND=scrapling|playwright` pins one (useful when a board breaks
   on one backend only); `JOBREACH_SCRAPLING_PYTHON` points at an interpreter
   that has Scrapling, if auto-detection missed it.
-- Wantedly needs no browser at all, so it keeps working even when the browser
-  stack is missing — if a search fails only on Indeed/Mynavi, that is why.
 
 ## Indeed Japan
 
@@ -180,7 +188,9 @@ correct, not a bug. Use `new_only: true` to surface only fresh listings, or
 |------|------|
 | Design jobs in Tokyo (the default feed) | `job_search()` |
 | Engineer roles, Wantedly only, top 10 | `job_search(keyword="engineer", sources=["wantedly"], limit=10)` |
-| Widest net for one query | `job_search(keyword="データサイエンティスト", sources=["wantedly", "indeed"])` |
+| Full market sweep, still fast | `job_search(keyword="データサイエンティスト", sources=["wantedly", "green", "daijob"])` |
+| English-speaking employers | `job_search(keyword="engineer", sources=["japandev", "daijob"])` |
+| Widest net for one query | `job_search(keyword="designer", sources=["wantedly", "indeed", "green"])` |
 | Only what is new since last check | `job_search(keyword="…", new_only=True)` |
 | Throwaway search, do not persist | `job_search(keyword="UX researcher", save=False)` |
 | Clean up noisy results | `job_search(keyword="designer", validation="local", profile="designer")` |
@@ -209,6 +219,12 @@ correct, not a bug. Use `new_only: true` to surface only fresh listings, or
    must succeed first; if it hangs, Chrome is not running.
 10. **Pinning a backend and leaving it pinned.** `JOBREACH_BACKEND` is a
     debugging tool; `auto` is the right setting in normal use.
+11. **Sending a Japanese keyword to Japan Dev.** Its titles are English and its
+    search box is client-side, so `デザイナー` returns nothing there. Search it
+    with English terms (`designer`, `engineer`) or leave it out.
+12. **Expecting a board to honour every location.** Green and Daijob only know
+    their own codes: an unmapped location means "no filter" (nationwide), and
+    Mynavi ignores location entirely. Say so instead of implying a city filter.
 
 ## Verification checklist
 

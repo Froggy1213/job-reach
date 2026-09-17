@@ -71,6 +71,7 @@ class WantedlyScraper(BaseScraper):
 
     url_encodes_keyword = True  # the API filters by q= server-side
     needs_browser = False  # JSON over HTTP: no browser, no venv, no Chromium
+    http_note = "JSON API over HTTP — no browser involved"
 
     @property
     def platform(self) -> SourcePlatform:

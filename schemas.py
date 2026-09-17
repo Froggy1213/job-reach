@@ -24,16 +24,17 @@ _SEARCH = {
     "name": "job_search",
     "description": (
         "Search Japanese job boards live and return structured listings. "
-        "Boards: 'wantedly' (general-purpose, honours keyword + location — use "
-        "this for any free-text or non-design search; read over Wantedly's own "
-        "JSON API, so it is fast and needs no browser), 'indeed' (all of Japan's "
-        "market, honours keyword + location; drives a stealth browser and takes "
-        "~30 seconds), 'mynavi2027' (new-graduate design roles only; ignores "
-        "location), 'linkedin' (via the OpenCLI Chrome bridge; needs Chrome "
-        "running). With no keyword it runs the built-in design-in-Tokyo feed. "
-        "Listings are deduplicated against the local database and flagged "
-        "'is_new' when this run is the first to see them. A live scrape takes "
-        "5-90 seconds depending on the boards — do not retry in a loop."
+        "Fast, browser-free boards: 'wantedly' (general-purpose, any language, "
+        "read over its JSON API), 'green' (IT/Web industry, salary usually on "
+        "the card), 'daijob' (bilingual and foreign-capital employers), "
+        "'japandev' (English-speaking tech jobs). Slower boards: 'indeed' (the "
+        "widest market, ~30 s, drives a stealth browser), 'mynavi2027' "
+        "(new-graduate design roles only; ignores location), 'linkedin' (via "
+        "the OpenCLI Chrome bridge; needs Chrome running). With no keyword it "
+        "runs the built-in design-in-Tokyo feed. Listings are deduplicated "
+        "against the local database and flagged 'is_new' when this run is the "
+        "first to see them. A live scrape takes 1-90 seconds depending on the "
+        "boards — do not retry in a loop."
     ),
     "parameters": {
         "type": "object",
@@ -43,24 +44,27 @@ _SEARCH = {
                 "description": (
                     "Free-text query, e.g. 'frontend engineer' or 'デザイナー'. "
                     "Omit for the default design feed. Recommended with "
-                    "sources=['wantedly']."
+                    "sources=['wantedly'] or the fast boards."
                 ),
             },
             "location": {
                 "type": "string",
                 "description": (
-                    "Location: a Wantedly/Indeed slug ('tokyo', 'osaka'), a "
-                    "Japanese place name ('大阪'), or 'any' for nationwide. "
-                    "Mynavi ignores it. Default: 'tokyo'."
+                    "Location: a slug ('tokyo', 'osaka') or a Japanese place "
+                    "name ('大阪'), or 'any' for nationwide. Boards map it to "
+                    "their own codes; Green and Daijob ignore a location they "
+                    "do not know, and Mynavi ignores it entirely. Default: 'tokyo'."
                 ),
             },
             "sources": {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": (
-                    "Boards to search: 'wantedly', 'indeed', 'mynavi2027', "
-                    "'linkedin'. Default: ['wantedly','mynavi2027','linkedin']. "
-                    "Add 'indeed' explicitly for the widest coverage."
+                    "Boards to search: 'wantedly', 'indeed', 'green', 'daijob', "
+                    "'japandev', 'mynavi2027', 'linkedin'. Default: "
+                    "['wantedly','mynavi2027','linkedin'] (the design feed). "
+                    "For an English-language search add 'japandev' or 'daijob'; "
+                    "for the widest market add 'indeed'."
                 ),
             },
             "limit": {

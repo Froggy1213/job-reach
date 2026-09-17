@@ -8,12 +8,14 @@ methods. The fetch layer itself is covered by ``test_fetchers.py``.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
 from jobreach.domain import SourcePlatform
 from jobreach.errors import MissingDependencyError, ScraperError
 from jobreach.fetchers import FetchResult
+from jobreach.htmlextract import next_data
 from jobreach.scrapers import (
     SCRAPERS,
     available_sources,
@@ -24,7 +26,10 @@ from jobreach.scrapers import (
     scraper_for,
 )
 from jobreach.scrapers.cli_base import _records_from
+from jobreach.scrapers.daijob import DaijobScraper
+from jobreach.scrapers.green import GreenScraper
 from jobreach.scrapers.indeed import LOCATION_SLUGS, IndeedScraper
+from jobreach.scrapers.japandev import JapanDevScraper
 from jobreach.scrapers.linkedin import LinkedInScraper
 from jobreach.scrapers.mynavi2027 import Mynavi2027Scraper
 from jobreach.scrapers.wantedly import WantedlyScraper
@@ -34,7 +39,9 @@ from jobreach.scrapers.wantedly import WantedlyScraper
 
 def test_every_board_has_a_scraper():
     """Indeed used to be ingest-only; the stealth browser graduated it."""
-    assert set(available_sources()) == {"wantedly", "mynavi2027", "linkedin", "indeed"}
+    assert set(available_sources()) == {
+        "wantedly", "indeed", "green", "daijob", "japandev", "mynavi2027", "linkedin",
+    }
     assert set(SCRAPERS) == set(available_sources())
 
 
@@ -94,7 +101,7 @@ def test_requirements_report_a_missing_browser_for_every_browser_board(
         raise MissingDependencyError("no browser backend here", hint="run setup")
 
     monkeypatch.setattr("jobreach.scrapers.base.probe_browser_stack", _missing)
-    problems = check_source_requirements(["wantedly", "mynavi2027", "linkedin", "indeed"])
+    problems = check_source_requirements(list(SCRAPERS))
     assert set(problems) == {"mynavi2027", "indeed"}
     assert "run setup" in problems["indeed"]
 
@@ -104,13 +111,16 @@ def test_requirements_are_clean_when_a_backend_exists(monkeypatch: pytest.Monkey
     monkeypatch.setattr(
         "jobreach.scrapers.base.probe_browser_stack", lambda: ("scrapling", "Scrapling 0.4")
     )
-    assert check_source_requirements(["wantedly", "mynavi2027", "linkedin", "indeed"]) == {}
+    assert check_source_requirements(list(SCRAPERS)) == {}
 
 
 def test_needs_browser_matches_the_implementation():
     assert needs_browser("indeed") is True
     assert needs_browser("mynavi2027") is True
     assert needs_browser("wantedly") is False
+    assert needs_browser("green") is False  # JSON embedded in the page
+    assert needs_browser("daijob") is False  # server-rendered HTML
+    assert needs_browser("japandev") is False  # server-rendered HTML
     assert needs_browser("linkedin") is False  # CLI-driven, not a browser
     assert needs_browser("monster") is False
 
@@ -448,3 +458,135 @@ def test_cli_record_unwrapping(raw: object, expected_count: int):
 def test_cli_record_unwrapping_rejects_garbage():
     with pytest.raises(ScraperError):
         _records_from("nope")
+
+
+# --- Green (JSON embedded in the page) -------------------------------------
+
+#: Real markup captured from the live sites, trimmed to a couple of cards.
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+def fixture(name: str) -> str:
+    return (FIXTURES / name).read_text(encoding="utf-8")
+
+
+def green_jobs(keyword: str | None = "デザイナー"):
+    html = fixture("green_search.html")
+    offers = GreenScraper.offers_in(next_data(html) or {})
+    return GreenScraper(keyword=keyword)._parse_offers(offers)
+
+
+def test_green_reads_its_embedded_payload():
+    jobs = green_jobs()
+    assert len(jobs) == 2
+    first = jobs[0]
+    assert first.source_platform is SourcePlatform.GREEN
+    assert first.url.startswith("https://www.green-japan.com/company/")
+    assert first.company and first.location and first.salary
+    assert first.posted_at is not None
+
+
+def test_green_maps_slugs_and_place_names_to_area_ids():
+    assert GreenScraper(location="tokyo").area_id == 13
+    assert GreenScraper(location="大阪").area_id == 27
+    assert GreenScraper(location="any").area_id is None
+    assert GreenScraper(location="99").area_id == 99  # a raw id passes through
+
+
+def test_green_url_encodes_keyword_area_and_page():
+    url = GreenScraper(keyword="デザイナー", location="tokyo").build_search_url(2)
+    assert url.startswith("https://www.green-japan.com/search?")
+    assert "area_ids=13" in url and "page=2" in url
+    assert "keyword=%E3%83%87%E3%82%B6%E3%82%A4%E3%83%8A%E3%83%BC" in url
+
+
+def test_green_skips_offers_without_a_title_or_url():
+    jobs = GreenScraper()._parse_offers(
+        [
+            {"name": "UI Designer", "jobOfferUrl": "/company/1/job/2"},
+            {"name": "No URL"},
+            {"jobOfferUrl": "/company/1/job/3"},
+            "junk",
+        ]
+    )
+    assert [job.title for job in jobs] == ["UI Designer"]
+
+
+def test_green_reports_a_missing_payload_path():
+    with pytest.raises(ScraperError, match="job offers"):
+        GreenScraper.offers_in({"props": {"pageProps": {}}})
+
+
+# --- Daijob (server-rendered HTML) -----------------------------------------
+
+
+def daijob_jobs(keyword: str | None = "designer"):
+    scraper = DaijobScraper(keyword=keyword)
+    return scraper._parse_cards(scraper.card_chunks(fixture("daijob_search.html")))
+
+
+def test_daijob_reads_cards_from_real_markup():
+    jobs = daijob_jobs()
+    assert len(jobs) == 2
+    first = jobs[0]
+    assert first.source_platform is SourcePlatform.DAIJOB
+    assert first.url.startswith("https://www.daijob.com/jobs/detail/")
+    assert first.company != "Unknown"
+    assert first.salary
+    assert first.description
+
+
+def test_daijob_compacts_the_location_cell():
+    """The cell reads "アジア 日本 東京都 新宿区 / …" — the prefix is noise."""
+    location = daijob_jobs()[0].location
+    assert "アジア" not in location and "日本" not in location
+    assert location.startswith("東京都")
+    assert " / " in location  # several offices are kept, deduplicated
+
+
+def test_daijob_url_scopes_to_japan_and_the_prefecture():
+    url = DaijobScraper(keyword="designer", location="tokyo").build_search_url(2)
+    assert "la=102" in url and "ac=118" in url and "page=2" in url
+    assert "keyword=designer" in url
+
+
+def test_daijob_location_sentinel_drops_the_prefecture_filter():
+    url = DaijobScraper(location="any").build_search_url(1)
+    assert "ac=" not in url and "la=" not in url
+
+
+# --- Japan Dev (server-rendered HTML, client-side search) ------------------
+
+
+def japandev_jobs(keyword: str | None = None):
+    scraper = JapanDevScraper(keyword=keyword)
+    return scraper._parse_cards(scraper.card_chunks(fixture("japandev_jobs.html")))
+
+
+def test_japandev_reads_cards_from_real_markup():
+    jobs = japandev_jobs(keyword="engineer")
+    assert jobs, "the fixture cards are engineering roles"
+    first = jobs[0]
+    assert first.source_platform is SourcePlatform.JAPAN_DEV
+    assert first.url.startswith("https://japan-dev.com/jobs/")
+    assert first.company != "Unknown"
+    assert first.location in {"Tokyo", "Remote", "Japan"} or first.location
+
+
+def test_japandev_filters_client_side():
+    """The site ignores ?query= (verified), so relevance filtering is ours."""
+    assert JapanDevScraper(keyword="designer")._parse_cards(
+        JapanDevScraper.card_chunks(fixture("japandev_jobs.html"))
+    ) == []
+    assert JapanDevScraper().matches("Designer (Sales AI Agent Business)") is True
+    assert JapanDevScraper().matches("Production Engineer, Trading") is False
+
+
+def test_japandev_keeps_the_visa_and_language_flags():
+    jobs = japandev_jobs(keyword="engineer")
+    assert any(job.description for job in jobs), "the flags are the point of this board"
+    assert not any("Japanese required · No Japanese required" in (job.description or "") for job in jobs)
+
+
+def test_japandev_sends_no_parameters_because_the_site_ignores_them():
+    assert JapanDevScraper(keyword="designer", location="osaka").build_list_url() == "https://japan-dev.com/jobs"

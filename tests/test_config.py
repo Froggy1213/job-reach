@@ -86,13 +86,24 @@ def test_sources_parses_a_list_and_deduplicates():
 
 def test_all_expands_to_every_board():
     assert Sources.parse("all").as_list() == [
-        "wantedly", "mynavi2027", "linkedin", "indeed"
+        "wantedly", "mynavi2027", "linkedin", "indeed", "green", "daijob", "japandev",
     ]
 
 
 def test_all_boards_are_scrapable():
     """``Sources.scraped`` used to drop Indeed (ingest-only); now it keeps it."""
-    assert Sources.parse("all").scraped == ("wantedly", "mynavi2027", "linkedin", "indeed")
+    assert Sources.parse("all").scraped == (
+        "wantedly", "mynavi2027", "linkedin", "indeed", "green", "daijob", "japandev",
+    )
+
+
+def test_board_aliases_resolve_to_one_platform():
+    from jobreach.domain import SourcePlatform
+
+    assert Sources.parse("japandev").as_list() == ["japandev"]
+    for alias in ("green", "green-japan", "greenjapan"):
+        assert Sources.parse(alias).as_list() == ["green"]
+    assert SourcePlatform.JAPAN_DEV.value == "japan_dev"
 
 
 def test_unknown_source_is_rejected():

@@ -131,6 +131,10 @@ class BaseScraper(ABC):
     #: a browser stack on their behalf.
     needs_browser: bool = True
 
+    #: One line describing how a browser-free board is read; shown by
+    #: ``doctor`` so "no browser" never has to be taken on faith.
+    http_note: str = "read over HTTP — no browser involved"
+
     #: Browser fetch modes to try, in order. Scrapling's stealth browser can
     #: solve a Cloudflare challenge that a plain browser cannot, so a board may
     #: name a chain and let the first working mode win.

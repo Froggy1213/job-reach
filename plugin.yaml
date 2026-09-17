@@ -1,10 +1,10 @@
 name: job-reach
-version: "2.1.0"
+version: "2.2.0"
 description: >-
-  Search Japanese job boards (Wantedly, Indeed, Mynavi 2027, LinkedIn) and track
-  which listings are new since the last run. Ships LLM-callable tools for
-  searching, ingesting hand-fetched listings, writing Obsidian notes, and
-  scheduling recurring monitoring through hermes cron.
+  Search Japanese job boards (Wantedly, Indeed, Green, Daijob, Japan Dev,
+  Mynavi 2027, LinkedIn) and track which listings are new since the last run.
+  Ships LLM-callable tools for searching, ingesting hand-fetched listings,
+  writing Obsidian notes, and scheduling recurring monitoring through hermes cron.
 author: Froggy1213
 license: MIT
 homepage: https://github.com/Froggy1213/job-reach

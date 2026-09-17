@@ -23,7 +23,10 @@ from ..domain import SourcePlatform
 from . import base
 from .base import BaseScraper
 from .cli_base import CliScraper
+from .daijob import DaijobScraper
+from .green import GreenScraper
 from .indeed import IndeedScraper
+from .japandev import JapanDevScraper
 from .linkedin import LinkedInScraper
 from .mynavi2027 import Mynavi2027Scraper
 from .wantedly import WantedlyScraper
@@ -31,9 +34,12 @@ from .wantedly import WantedlyScraper
 #: Board name (as used on the CLI and in tool arguments) → scraper class.
 SCRAPERS: dict[str, type[BaseScraper]] = {
     "wantedly": WantedlyScraper,
+    "indeed": IndeedScraper,
+    "green": GreenScraper,
+    "daijob": DaijobScraper,
+    "japandev": JapanDevScraper,
     "mynavi2027": Mynavi2027Scraper,
     "linkedin": LinkedInScraper,
-    "indeed": IndeedScraper,
 }
 
 #: Boards that cannot be scraped and must be fed in via ``job_ingest``.
@@ -47,7 +53,10 @@ INGEST_ONLY: dict[str, SourcePlatform] = {}
 __all__ = [
     "BaseScraper",
     "CliScraper",
+    "DaijobScraper",
+    "GreenScraper",
     "IndeedScraper",
+    "JapanDevScraper",
     "LinkedInScraper",
     "Mynavi2027Scraper",
     "WantedlyScraper",

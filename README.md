@@ -69,6 +69,34 @@ ask for rather than something you perform.
 
 ---
 
+## What changed in 2.2
+
+Three more boards, chosen so the *cheap* half of the market is covered without a
+browser at all:
+
+- **Green** (`green`) — IT/Web industry postings. The site is a Next.js app, but
+  it serialises its results into the page's `__NEXT_DATA__` payload, so the
+  whole search comes back as typed JSON: title, company, area, **salary**,
+  description, publication date. ~1 s per run.
+- **Daijob** (`daijob`) — bilingual and foreign-capital employers. Plain
+  server-rendered HTML, read with the standard library
+  (`jobreach/htmlextract.py`): card split by `article.job-card`, fields from the
+  card's `<dt>/<dd>` pairs (勤務地, 年収, 仕事内容). ~2 s per run.
+- **Japan Dev** (`japandev`) — English-speaking tech jobs. Server-rendered too,
+  but its search box filters **client-side** (verified: three different queries
+  returned the identical set of 60 listings), so the plugin downloads the page
+  and applies its own title filter. ~1 s per run.
+
+With Wantedly that makes **four of seven boards browser-free**, which matters on
+a machine where the browser stack is missing: they keep working. `doctor` now
+reports each board's backend (`http`, `scrapling`, `cli`), and `-s all` fans out
+across all seven.
+
+Also: `htmlextract.py` (a small, tested stdlib HTML reader) and
+source aliases (`green-japan`, `japan-dev`, `mynavi`) on the command line.
+
+---
+
 ## What changed in 2.1
 
 Three upgrades, all driven by capabilities that appeared after 2.0 was written:
@@ -102,6 +130,9 @@ Also: `posted_at` is carried through the store and the JSON envelope, and
 | Board | Keyword search | Location | How it is fetched |
 |-------|----------------|----------|-------------------|
 | **Wantedly** | ✅ server-side | ✅ slug (`tokyo`, `osaka`, `any`) | **JSON API over HTTP** — no browser, ~4 s |
+| **Green** | ✅ server-side | ✅ slug or place name, by prefecture id | **JSON embedded in the page** — no browser, ~1 s |
+| **Daijob** | ✅ server-side | ✅ slug (`tokyo`, `osaka`), by prefecture code | **Server-rendered HTML** — no browser, ~2 s |
+| **Japan Dev** | ⚠️ titles only (the site's search is client-side) | ❌ | **Server-rendered HTML** — no browser, ~1 s |
 | **Indeed Japan** | ✅ server-side | ✅ slug or place name (`大阪`) | **Stealth browser (Scrapling)** — ~30 s |
 | **Mynavi 2027** | ⚠️ best-effort | ❌ ignored | Stealth/Playwright browser, by occupation code |
 | **LinkedIn** | ✅ server-side | ✅ | `opencli` CLI (your logged-in Chrome) |
@@ -164,6 +195,7 @@ skills/job-search/           SKILL.md + references/ (the agent's playbook)
 jobreach/                   the engine — standard library only
 ├── domain.py                SourcePlatform, JobPosting (frozen dataclass)
 ├── webclient.py             stdlib HTTP for boards with a JSON API
+├── htmlextract.py           stdlib HTML reading (cards, fields, embedded JSON)
 ├── fetchers.py              the step vocabulary + backend selection
 ├── scrapling.py             locate and drive a Scrapling install
 ├── drivers/                 scripts executed by another interpreter

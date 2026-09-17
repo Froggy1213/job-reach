@@ -43,9 +43,17 @@ class SourcePlatform(StrEnum):
     """LinkedIn Jobs — fetched through the ``opencli linkedin`` CLI."""
 
     INDEED = "indeed"
-    """Indeed Japan — no scraper: Cloudflare blocks headless clients, so a
-    real browser (driven by the Hermes agent) fetches the cards and feeds
-    them back in through ``job_ingest``."""
+    """Indeed Japan — the widest market; scraped with a stealth browser, and
+    the one board that can be bot-blocked (see ``job_ingest`` for the fallback)."""
+
+    GREEN = "green"
+    """Green — IT/Web industry board; read from the JSON its pages embed."""
+
+    DAIJOB = "daijob"
+    """Daijob — bilingual / foreign-capital postings; server-rendered HTML."""
+
+    JAPAN_DEV = "japan_dev"
+    """Japan Dev — English-speaking tech jobs; server-rendered HTML."""
 
 
 #: Human-facing labels, used in notes and tool output.
@@ -54,6 +62,9 @@ PLATFORM_LABELS: dict[SourcePlatform, str] = {
     SourcePlatform.MYNAVI_2027: "Mynavi 2027",
     SourcePlatform.LINKEDIN: "LinkedIn",
     SourcePlatform.INDEED: "Indeed Japan",
+    SourcePlatform.GREEN: "Green",
+    SourcePlatform.DAIJOB: "Daijob",
+    SourcePlatform.JAPAN_DEV: "Japan Dev",
 }
 
 #: Aliases accepted on the command line / in tool arguments.
@@ -64,6 +75,13 @@ PLATFORM_ALIASES: dict[str, SourcePlatform] = {
     "mynavi_2027": SourcePlatform.MYNAVI_2027,
     "linkedin": SourcePlatform.LINKEDIN,
     "indeed": SourcePlatform.INDEED,
+    "green": SourcePlatform.GREEN,
+    "greenjapan": SourcePlatform.GREEN,
+    "green-japan": SourcePlatform.GREEN,
+    "daijob": SourcePlatform.DAIJOB,
+    "japandev": SourcePlatform.JAPAN_DEV,
+    "japan_dev": SourcePlatform.JAPAN_DEV,
+    "japan-dev": SourcePlatform.JAPAN_DEV,
 }
 
 

@@ -433,7 +433,7 @@ def diagnostics() -> dict[str, Any]:
                 "backend": "http",
                 "needs_browser": False,
                 "problem": None,
-                "note": "read over the board's JSON API — no browser involved",
+                "note": scraper_class.http_note,
             }
         else:
             boards[name] = {
