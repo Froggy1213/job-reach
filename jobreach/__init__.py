@@ -33,6 +33,6 @@ from __future__ import annotations
 #: Engine version. Kept equal to ``plugin.yaml``'s ``version`` by a contract test:
 #: ``jobreach doctor`` reports this one and Hermes' plugin list reports the other,
 #: so drift makes the same install claim two different versions.
-__version__ = "2.4.0"
+__version__ = "2.5.0"
 
 __all__ = ["__version__"]

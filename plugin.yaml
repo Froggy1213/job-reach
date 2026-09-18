@@ -1,5 +1,5 @@
 name: job-reach
-version: "2.4.0"
+version: "2.5.0"
 description: >-
   Search Japanese job boards (Wantedly, Indeed, Green, Daijob, Japan Dev,
   Mynavi 2027, LinkedIn) and track which listings are new since the last run.
@@ -124,3 +124,26 @@ config_schema:
       How many listings job_list returns when the caller passes no limit, and
       the limit job_search falls back to. Unset means the engine's own default
       (all matches for a search). An explicit `limit` argument always wins.
+  default_validation:
+    type: str
+    required: false
+    default: "off"
+    # Deliberately a *default*: a bare search stays unfiltered until the user
+    # asks otherwise, so an existing install's results do not change size
+    # without one. Setting it to 'local' is what makes the cheap, relevant
+    # answer the default one.
+    description: >-
+      Relevance filter used when the caller passes neither `validation` nor
+      `--validate`: 'off' (default) returns every match, 'local' drops the
+      obvious noise with free regex heuristics, 'llm' classifies against the
+      profile below and needs an API key. An explicit argument or flag always
+      wins.
+  default_profile:
+    type: str
+    required: false
+    default: "designer"
+    description: >-
+      Filter profile used when the caller passes neither `profile` nor
+      `--profile`: designer (default), frontend, engineering, product or any.
+      It only has an effect while relevance filtering is on (a 'local' or 'llm'
+      validation); an explicit argument or flag always wins.

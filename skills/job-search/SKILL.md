@@ -1,7 +1,7 @@
 ---
 name: job-search
 description: Find jobs on Japanese boards and track what is new.
-version: 2.4.0
+version: 2.5.0
 author: Froggy1213
 license: MIT
 platforms: [macos, linux, windows]

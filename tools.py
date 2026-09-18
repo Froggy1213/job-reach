@@ -65,7 +65,14 @@ logger = logging.getLogger(__name__)
 #: because this module must stay importable on its own — tooling imports it as a
 #: plain submodule, without the plugin package's ``__init__`` having run —
 #: while ``__init__.py`` re-exports it for the manifest tests.
-SETTINGS_KEYS = ("default_keyword", "default_sources", "note_subfolder", "max_results")
+SETTINGS_KEYS = (
+    "default_keyword",
+    "default_sources",
+    "note_subfolder",
+    "max_results",
+    "default_validation",
+    "default_profile",
+)
 
 #: Generous per-call ceiling: a two-board headless scrape plus retries.
 DEFAULT_TIMEOUT = 600.0
