@@ -432,3 +432,78 @@ def test_run_search_reads_the_same_setting(monkeypatch: pytest.MonkeyPatch):
     setting(monkeypatch, "default_sources", "green")
     run_search()
     assert seen[-1].sources.as_list() == ["green"]
+
+
+# --------------------------------------------------------------------------- #
+# Settings-aware relevance defaults
+# --------------------------------------------------------------------------- #
+
+
+def test_the_relevance_defaults_are_the_built_in_ones(monkeypatch: pytest.MonkeyPatch):
+    """Nothing configured → a bare search returns exactly what it did before."""
+    clear_settings(monkeypatch)
+    args = build_parser().parse_args(["search"])
+    assert args.validate == "off"
+    assert args.profile == "designer"
+
+
+def test_the_configured_relevance_defaults_reach_both_subcommands(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """One setting feeds ``search`` and ``monitor`` — they are not allowed to drift."""
+    setting(monkeypatch, "default_validation", "local")
+    setting(monkeypatch, "default_profile", "frontend")
+    parser = build_parser()
+    for argv in (["search"], ["monitor"]):
+        args = parser.parse_args(argv)
+        assert args.validate == "local"
+        assert args.profile == "frontend"
+
+
+def test_an_explicit_relevance_flag_beats_the_setting(monkeypatch: pytest.MonkeyPatch):
+    setting(monkeypatch, "default_validation", "llm")
+    setting(monkeypatch, "default_profile", "product")
+    parser = build_parser()
+    for argv, expected in (
+        (["search", "--validate", "off"], ("off", "product")),
+        (["search", "--profile", "any"], ("llm", "any")),
+        (["search", "--validate", "local", "--profile", "frontend"], ("local", "frontend")),
+        (["monitor", "--validate", "llm"], ("llm", "product")),
+    ):
+        args = parser.parse_args(argv)
+        assert (args.validate, args.profile) == expected
+
+
+def test_monitor_keeps_its_own_cheap_default(monkeypatch: pytest.MonkeyPatch):
+    """A scheduled digest is filtered even though a bare search is not.
+
+    ``monitor`` hard-coded ``--validate local`` before the setting existed; an
+    unconfigured install keeps that, and a configured value wins.
+    """
+    clear_settings(monkeypatch)
+    assert build_parser().parse_args(["monitor"]).validate == "local"
+    setting(monkeypatch, "default_validation", "off")
+    assert build_parser().parse_args(["monitor"]).validate == "off"
+
+
+def test_a_junk_relevance_setting_never_reaches_the_parser(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A typo must not surface as argparse's ``invalid choice`` usage dump."""
+    setting(monkeypatch, "default_validation", "perhaps")
+    setting(monkeypatch, "default_profile", "design")
+    args = build_parser().parse_args(["search"])
+    assert (args.validate, args.profile) == ("off", "designer")
+
+
+def test_search_dispatch_uses_the_configured_relevance_defaults(
+    data_home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+):
+    """The setting has to arrive in the request, not just in the parser."""
+    setting(monkeypatch, "default_validation", "local")
+    setting(monkeypatch, "default_profile", "engineering")
+    seen = capture_search(monkeypatch)
+    code, _, _ = run(capsys, "search", "--json")
+    assert code == EXIT_OK
+    assert seen[-1].validation == "local"
+    assert seen[-1].validation_profile == "engineering"

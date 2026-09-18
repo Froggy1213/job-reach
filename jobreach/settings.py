@@ -10,6 +10,12 @@ Nothing here validates against the schema in ``plugin.yaml`` — that schema is
 declared for Hermes' own load-time validation; this module only applies
 defaults and normalises types. A key that is absent or blank means "use the
 plugin default", never "override with nothing".
+
+The two enumerated settings (``default_validation``, ``default_profile``) are
+the one place that goes further: the parser has to end up with a value it can
+hand to the engine even when the operator typed something else, so an unknown
+value falls back to the plugin default and is logged. A crash there would take
+down an unattended monitor over a typo in ``config.yaml``.
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ from collections.abc import Mapping, MutableMapping, Sequence
 from typing import Any
 
 from . import config
+from .logging_setup import get_logger
 
 #: Every mirrored setting travels under this prefix, e.g.
 #: ``JOBREACH_SETTING_DEFAULT_SOURCES``.
@@ -27,7 +34,34 @@ SETTING_PREFIX = "JOBREACH_SETTING_"
 #: The keys ``plugin.yaml``'s ``config_schema`` advertises, in manifest order.
 #: :func:`describe` reports exactly these, so an unrelated variable that happens
 #: to share the prefix can never be mistaken for a setting the user configured.
-CONFIG_SCHEMA_KEYS = ("default_keyword", "default_sources", "note_subfolder", "max_results")
+CONFIG_SCHEMA_KEYS = (
+    "default_keyword",
+    "default_sources",
+    "note_subfolder",
+    "max_results",
+    "default_validation",
+    "default_profile",
+)
+
+#: Relevance-filter modes ``plugin.yaml`` advertises, in the order it lists them.
+#: The first entry is the engine's own default, so an install that configures
+#: nothing behaves exactly as it did before the setting existed.
+VALIDATION_MODES = ("off", "local", "llm")
+
+#: Mode used when neither a flag nor a setting names one.
+DEFAULT_VALIDATION = VALIDATION_MODES[0]
+
+#: Profiles ``plugin.yaml`` advertises, in the order it lists them. Duplicated
+#: from ``filters.FILTER_PROFILES`` deliberately — the settings bridge must not
+#: depend on the filter layer — and pinned equal by ``tests/test_settings.py``,
+#: so adding a profile to the engine fails loudly here instead of quietly
+#: refusing to be configured.
+PROFILE_NAMES = ("designer", "frontend", "engineering", "product", "any")
+
+#: Profile used when neither a flag nor a setting names one.
+DEFAULT_PROFILE = "designer"
+
+logger = get_logger("settings")
 
 
 def env_name(key: str) -> str:
@@ -138,6 +172,51 @@ def default_sources(env: Mapping[str, str] | None = None) -> tuple[str, ...]:
 def note_subfolder(env: Mapping[str, str] | None = None) -> str:
     """Subfolder for generated Obsidian notes (blank → ``config.NOTE_SUBFOLDER``)."""
     return get_setting("note_subfolder", config.NOTE_SUBFOLDER, env)
+
+
+def _enum(
+    key: str, allowed: tuple[str, ...], default: str, env: Mapping[str, str] | None
+) -> str:
+    """One of *allowed*, or *default* — never junk, never an exception.
+
+    An unknown value is a typo in ``config.yaml``, and the engine is the wrong
+    place to find out: a monitor that raised on it would stop reporting
+    altogether. It is logged instead and the run continues on *default*, which
+    is also what a blank field means — so "cleared" and "mistyped" end up in
+    one place.
+
+    Matching ignores case because the value is hand-typed, and the canonical
+    (lower-case) spelling is returned, never what the user typed.
+    """
+    value = get_setting(key, "", env).lower()
+    if not value:
+        return default
+    if value not in allowed:
+        logger.warning("ignoring %s: %r is not one of %s", key, value, ", ".join(allowed))
+        return default
+    return value
+
+
+def validation(
+    env: Mapping[str, str] | None = None, *, default: str = DEFAULT_VALIDATION
+) -> str:
+    """Relevance-filter mode to run when no ``--validate`` is passed (``off`` by default).
+
+    ``monitor`` passes ``default="local"``: an unattended digest keeps its own
+    cheap filter unless the user configured something, which is the only place
+    the engine's default differs from ``search``'s.
+    """
+    return _enum("default_validation", VALIDATION_MODES, default, env)
+
+
+def profile(env: Mapping[str, str] | None = None, *, default: str = DEFAULT_PROFILE) -> str:
+    """Filter profile to run when no ``--profile`` is passed (``designer`` by default).
+
+    See :data:`PROFILE_NAMES` for why the list lives here as well as in
+    ``filters``: an unknown profile must reach the parser as a *default*, not as
+    a traceback.
+    """
+    return _enum("default_profile", PROFILE_NAMES, default, env)
 
 
 def apply_default_settings(

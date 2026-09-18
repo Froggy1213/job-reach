@@ -9,11 +9,12 @@ CLI the real public interface, so it has to be good on its own terms:
   from drifting.
 * failures exit non-zero with the message on stderr, so ``subprocess`` callers
   can distinguish "no results" from "it broke".
-* flags a Hermes setting can answer (``--source``, ``--subfolder``) take their
-  argparse default from :mod:`jobreach.settings`, so a configured
-  ``default_sources``/``note_subfolder`` reaches a bare ``jobreach search`` or
-  ``jobreach note``. An explicit flag still wins, and ``--help`` prints the
-  effective default.
+* flags a Hermes setting can answer (``--source``, ``--subfolder``,
+  ``--validate``, ``--profile``) take their argparse default from
+  :mod:`jobreach.settings`, so a configured ``default_sources``,
+  ``note_subfolder``, ``default_validation`` or ``default_profile`` reaches a
+  bare ``jobreach search`` or ``jobreach note``. An explicit flag still wins,
+  and ``--help`` prints the effective default.
 """
 
 from __future__ import annotations
@@ -67,6 +68,12 @@ def build_parser() -> argparse.ArgumentParser:
     # call rather than frozen at import time.
     default_source = _default_source_flag()
     default_subfolder = settings.note_subfolder()
+    default_validate = settings.validation()
+    default_profile = settings.profile()
+    # `monitor` runs unattended, so it keeps its own cheap default filter: the
+    # setting wins when the user set one, and a monitor installed before the
+    # setting existed behaves exactly as it did.
+    monitor_validate = settings.validation(default="local")
     parser.add_argument("--version", action="version", version=f"jobreach {__version__}")
     parser.add_argument(
         "-v", "--verbose", action="store_true",
@@ -94,10 +101,12 @@ def build_parser() -> argparse.ArgumentParser:
     search_cmd.add_argument("--headful", action="store_true",
                             help="show the browser window (debugging)")
     search_cmd.add_argument("--timeout-ms", type=int, default=30_000)
-    search_cmd.add_argument("--validate", choices=["off", "local", "llm"], default="off",
-                            help="relevance filter: 'local' is free, 'llm' needs an API key")
-    search_cmd.add_argument("--profile", default="designer",
-                            help="filter profile: designer, frontend, engineering, product, any")
+    search_cmd.add_argument("--validate", choices=settings.VALIDATION_MODES, default=default_validate,
+                            help="relevance filter: 'local' is free, 'llm' needs an API key "
+                                 f"(default: {default_validate})")
+    search_cmd.add_argument("--profile", default=default_profile,
+                            help=f"filter profile: {', '.join(settings.PROFILE_NAMES)} "
+                                 f"(default: {default_profile})")
     search_cmd.add_argument("--llm-model", default=None,
                             help="model for --validate llm (default: implied by the API key found)")
     search_cmd.add_argument("--llm-base-url", default=None,
@@ -147,10 +156,13 @@ def build_parser() -> argparse.ArgumentParser:
     monitor_cmd.add_argument("-l", "--location", default=DEFAULT_LOCATION)
     monitor_cmd.add_argument("-s", "--source", default=default_source,
                              help=f"boards to watch (default: {default_source})")
-    monitor_cmd.add_argument("--profile", default="designer")
+    monitor_cmd.add_argument("--profile", default=default_profile,
+                             help=f"filter profile (default: {default_profile})")
     monitor_cmd.add_argument("--llm-model", default=None)
     monitor_cmd.add_argument("--llm-base-url", default=None)
-    monitor_cmd.add_argument("--validate", choices=["off", "local", "llm"], default="local")
+    monitor_cmd.add_argument("--validate", choices=settings.VALIDATION_MODES,
+                             default=monitor_validate,
+                             help=f"relevance filter (default: {monitor_validate})")
     monitor_cmd.add_argument("--db", default=None)
 
     doctor_cmd = sub.add_parser("doctor", help="report runtime readiness")

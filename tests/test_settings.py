@@ -16,15 +16,18 @@ compared whole rather than spot-checked.
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from jobreach import runtime, settings
+from jobreach import filters, runtime, settings
 from jobreach.config import DEFAULT_SOURCES, NOTE_SUBFOLDER, plugin_dir
 
 
@@ -64,6 +67,8 @@ def test_config_schema_keys_match_the_bridge():
         "default_sources",
         "note_subfolder",
         "max_results",
+        "default_validation",
+        "default_profile",
     )
 
 
@@ -221,6 +226,119 @@ def test_note_subfolder_reads_the_setting():
 
 
 # --------------------------------------------------------------------------- #
+# The two enumerated settings
+# --------------------------------------------------------------------------- #
+
+
+@contextmanager
+def logged_warnings() -> Iterator[list[str]]:
+    """Everything ``settings`` warns about, whatever the engine's log config is.
+
+    The sink is attached to the module's own logger because ``setup_logging``
+    sets ``propagate = False`` on ``jobreach``: once any test in the session has
+    run ``main()``, pytest's ``caplog`` stops seeing these records, and a test
+    that only passes in isolation is worse than no test.
+    """
+    messages: list[str] = []
+
+    class _Sink(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    sink = _Sink()
+    settings.logger.addHandler(sink)
+    try:
+        yield messages
+    finally:
+        settings.logger.removeHandler(sink)
+
+
+@pytest.mark.parametrize("mode", settings.VALIDATION_MODES)
+def test_validation_honours_every_advertised_mode(mode: str):
+    assert settings.validation({"JOBREACH_SETTING_DEFAULT_VALIDATION": mode}) == mode
+
+
+@pytest.mark.parametrize("mode", settings.VALIDATION_MODES)
+def test_validation_ignores_the_typing_case(mode: str):
+    """``config.yaml`` is hand-edited; ``Local`` means ``local``."""
+    assert settings.validation({"JOBREACH_SETTING_DEFAULT_VALIDATION": mode.upper()}) == mode
+
+
+def test_validation_without_a_setting_is_the_engine_default():
+    """The whole point of the default: a bare search is unchanged until asked."""
+    assert settings.validation({}) == "off"
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_validation_of_a_cleared_setting_is_the_engine_default(blank: str):
+    assert settings.validation({"JOBREACH_SETTING_DEFAULT_VALIDATION": blank}) == "off"
+
+
+@pytest.mark.parametrize("junk", ["banana", "true", "0", "none", "off,local", "local llm"])
+def test_validation_falls_back_with_a_warning_never_an_exception(junk: str):
+    """A typo in ``config.yaml`` must not take an unattended monitor down."""
+    env = {"JOBREACH_SETTING_DEFAULT_VALIDATION": junk}
+    with logged_warnings() as messages:
+        assert settings.validation(env) == "off"
+    assert len(messages) == 1, "one warning per read, and it names the key"
+    assert "default_validation" in messages[0]
+    assert junk in messages[0]
+
+
+def test_validation_accepts_another_fallback():
+    """``monitor`` passes its own cheap default; a configured value still wins."""
+    assert settings.validation({}, default="local") == "local"
+    env = {"JOBREACH_SETTING_DEFAULT_VALIDATION": "llm"}
+    assert settings.validation(env, default="local") == "llm"
+
+
+def test_validation_falls_back_to_the_callers_default_on_junk():
+    env = {"JOBREACH_SETTING_DEFAULT_VALIDATION": "banana"}
+    with logged_warnings():
+        assert settings.validation(env, default="local") == "local"
+
+
+@pytest.mark.parametrize("name", settings.PROFILE_NAMES)
+def test_profile_honours_every_advertised_profile(name: str):
+    assert settings.profile({"JOBREACH_SETTING_DEFAULT_PROFILE": name}) == name
+
+
+def test_profile_names_are_every_profile_the_engine_knows():
+    """A profile added to ``filters`` must fail here, not stop being settable."""
+    assert set(settings.PROFILE_NAMES) == set(filters.available_profiles())
+
+
+def test_profile_without_a_setting_is_the_engine_default():
+    assert settings.profile({}) == "designer"
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_profile_of_a_cleared_setting_is_the_engine_default(blank: str):
+    assert settings.profile({"JOBREACH_SETTING_DEFAULT_PROFILE": blank}) == "designer"
+
+
+@pytest.mark.parametrize("junk", ["design", "ui designer", "designer,frontend", "deisgner"])
+def test_profile_falls_back_with_a_warning_never_an_exception(junk: str):
+    env = {"JOBREACH_SETTING_DEFAULT_PROFILE": junk}
+    with logged_warnings() as messages:
+        assert settings.profile(env) == "designer"
+    assert len(messages) == 1
+    assert "default_profile" in messages[0]
+
+
+@pytest.mark.parametrize("value", ["", "   ", "banana", "off", "llm", "0", "None", "designer"])
+def test_the_enum_resolvers_never_raise(value: str):
+    """Whatever ``config.yaml`` holds, the parser gets a usable word back."""
+    env = {
+        "JOBREACH_SETTING_DEFAULT_VALIDATION": value,
+        "JOBREACH_SETTING_DEFAULT_PROFILE": value,
+    }
+    with logged_warnings():
+        assert settings.validation(env) in settings.VALIDATION_MODES
+        assert settings.profile(env) in settings.PROFILE_NAMES
+
+
+# --------------------------------------------------------------------------- #
 # Writing the bridge (plugin process → child environment)
 # --------------------------------------------------------------------------- #
 
@@ -315,6 +433,18 @@ def test_describe_omits_unset_keys():
 def test_describe_omits_blank_values():
     env = {"JOBREACH_SETTING_DEFAULT_KEYWORD": "   "}
     assert settings.describe(env) == {}
+
+
+def test_describe_reports_the_relevance_settings():
+    """``doctor`` has to show the two keys that decide how much comes back."""
+    env = {
+        "JOBREACH_SETTING_DEFAULT_VALIDATION": "local",
+        "JOBREACH_SETTING_DEFAULT_PROFILE": "frontend",
+    }
+    assert settings.describe(env) == {
+        "default_validation": "local",
+        "default_profile": "frontend",
+    }
 
 
 def test_describe_reports_only_the_schema_keys_in_manifest_order():
