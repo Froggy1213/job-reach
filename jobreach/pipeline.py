@@ -17,6 +17,11 @@ Two entry points produce listings:
     through the identical dedupe/persist/report path. Keeping one shared path
     is the point: ingested and scraped listings behave exactly alike
     afterwards.
+
+Two output-shaping flags exist because the consumer of the envelope is a model
+on a context budget: ``detail`` (off by default) adds each listing's stored body
+text, and ``dedupe`` (on by default) collapses the cards that are one vacancy on
+one board. Neither changes what is stored — only what is reported.
 """
 
 from __future__ import annotations
@@ -74,6 +79,14 @@ class SearchRequest:
     #: another vendor's host.
     llm_model: str | None = None
     llm_base_url: str | None = None
+    #: Return each listing's stored body text. Off by default: descriptions
+    #: dominate the size of the envelope, so the caller has to ask (see
+    #: :meth:`jobreach.domain.JobPosting.to_dict`).
+    detail: bool = False
+    #: Collapse cards that are the same vacancy on the same board (see
+    #: :func:`collapse_duplicates`). On by default — an employer listing one
+    #: job thirty times is the common case on these boards, not an edge case.
+    dedupe: bool = True
 
 
 async def search(
@@ -171,6 +184,80 @@ async def _run_scrapers(request: SearchRequest) -> tuple[list[JobPosting], dict[
     return jobs, errors
 
 
+def _recency(job: JobPosting) -> tuple[int, float]:
+    """Order two cards of the same vacancy by "which one is the freshest".
+
+    A card that carries ``posted_at`` always beats one that does not, because
+    boards expose that field inconsistently (LinkedIn and Mynavi never do) and
+    a missing date would otherwise be read as "very old". The timestamp then
+    decides; ``scraped_at`` is the fallback because it *is* ``first_seen_at``
+    for a row read back from the store (see ``store._row_to_job``).
+    """
+    moment = job.posted_at or job.scraped_at
+    return (1 if job.posted_at else 0, moment.timestamp())
+
+
+def collapse_duplicates(
+    jobs: Sequence[JobPosting],
+) -> list[tuple[JobPosting, list[str]]]:
+    """Collapse content duplicates: one entry per (company, title, board).
+
+    The URL dedupe upstream cannot see these: one employer lists one vacancy as
+    dozens of cards, each with its own URL, so a seven-board search of 140
+    listings can be far fewer jobs. Cards are grouped on
+    :attr:`jobreach.domain.JobPosting.content_key` (normalised, so spacing and
+    case do not hide a group) and each group becomes one ``(representative,
+    collapsed_urls)`` pair, in first-encounter order.
+
+    The representative is the newest card — see :func:`_recency` — and a tie
+    keeps the first card encountered, so a run whose cards share one timestamp
+    is stable. Its ``is_new`` is the OR of the group's: a caller that counts the
+    ``is_new`` entries of ``jobs`` has to be able to reach ``summary.new``, and
+    a group is only "new" if no row of it was stored before.
+
+    The other descriptive fields (location, salary, description) come from the
+    representative too: it is the same vacancy, and the freshest card is the
+    one least likely to carry stale text.
+    """
+    groups: dict[tuple[str, str, str], list[JobPosting]] = {}
+    for job in jobs:
+        groups.setdefault(job.content_key, []).append(job)
+
+    collapsed: list[tuple[JobPosting, list[str]]] = []
+    for group in groups.values():
+        newest = 0
+        for index in range(1, len(group)):
+            if _recency(group[index]) > _recency(group[newest]):
+                newest = index
+        representative = group[newest]
+        if not representative.is_new and any(job.is_new for job in group):
+            representative = representative.with_new_flag(True)
+        collapsed.append(
+            (
+                representative,
+                [job.url for index, job in enumerate(group) if index != newest],
+            )
+        )
+    return collapsed
+
+
+def _wire(
+    job: JobPosting, *, detail: bool, collapsed_urls: list[str] | None
+) -> dict[str, Any]:
+    """One job's wire dict, plus its collapse evidence when *collapsed_urls* is given.
+
+    ``None`` means "this envelope was not collapsed" and adds nothing, so the
+    raw list a ``dedupe=false`` caller asked for is byte-for-byte the shape it
+    always was. A collapsed group always reports both keys, ``duplicates`` 0
+    included, so a caller never has to tell "no duplicates" from "not deduped".
+    """
+    payload = job.to_dict(detail=detail)
+    if collapsed_urls is not None:
+        payload["duplicates"] = len(collapsed_urls)
+        payload["duplicate_urls"] = collapsed_urls
+    return payload
+
+
 def _finish(
     jobs: list[JobPosting],
     errors: dict[str, str],
@@ -226,12 +313,29 @@ def _finish(
         saved = repository.save_many(new_jobs)
 
     by_platform: dict[str, dict[str, int]] = {}
+    # by_platform keeps counting the rows this run found — the same thing
+    # `total` counts — so a board's numbers still add up to the envelope's
+    # total. The collapse is reported by `unique`/`hidden_duplicates`, not by
+    # quietly shrinking a per-board count.
     for job in enriched:
         bucket = by_platform.setdefault(job.platform, {"total": 0, "new": 0})
         bucket["total"] += 1
         bucket["new"] += int(job.is_new)
 
-    ordered = sorted(enriched, key=lambda j: (not j.is_new, j.platform, j.title.lower()))
+    # Content dedupe sits between the new flag (a group's representative has to
+    # be able to inherit it) and the sort/limit, so `limit` and `shown` count
+    # the vacancies a caller reads rather than the cards. It does not touch the
+    # persistence above: every URL is still stored, so a card that was hidden
+    # today is not reported as new tomorrow.
+    collapsed = collapse_duplicates(enriched) if request.dedupe else None
+    if collapsed is None:
+        display = list(enriched)
+        collapsed_urls: dict[str, list[str]] = {}
+    else:
+        display = [job for job, _ in collapsed]
+        collapsed_urls = {job.url: urls for job, urls in collapsed}
+
+    ordered = sorted(display, key=lambda j: (not j.is_new, j.platform, j.title.lower()))
     if request.new_only:
         ordered = [job for job in ordered if job.is_new]
     shown = ordered[: request.limit] if request.limit else ordered
@@ -253,14 +357,21 @@ def _finish(
         },
         "summary": {
             "total": len(enriched),
-            "new": len(new_jobs),
+            # Counted on what is returned, not on the raw rows: a caller that
+            # counts `is_new` in `jobs` has to be able to reach this number.
+            "new": sum(1 for job in display if job.is_new),
             "saved": saved,
             "shown": len(shown),
+            "unique": len(display),
+            "hidden_duplicates": len(enriched) - len(display),
             "by_platform": by_platform,
             "errors": errors,
             "filter": filter_stats,
         },
-        "jobs": [job.to_dict() for job in shown],
+        "jobs": [
+            _wire(job, detail=request.detail, collapsed_urls=collapsed_urls.get(job.url))
+            for job in shown
+        ],
     }
 
 
@@ -277,14 +388,27 @@ def query(
     limit: int = 25,
     offset: int = 0,
     new_since: datetime | None = None,
+    detail: bool = False,
+    dedupe: bool = True,
 ) -> list[dict[str, Any]]:
-    """Read stored listings, newest first."""
+    """Read stored listings, newest first.
+
+    Collapsing happens *after* the store's page fetch, and it has to: the SQL
+    pages on ``first_seen_at`` and cannot group rows by content, so the page is
+    all the information this function has. The consequence is explicit rather
+    than hidden — ``duplicates`` says what was folded away *within the fetched
+    page*, and a vacancy split across two pages comes back as two cards with
+    ``duplicates`` 0 each. Paging further is how a caller sees the rest.
+    """
     platform = resolve_platform(source) if source else None
+    jobs = repository.query(
+        text=text, source=platform, limit=limit, offset=offset, new_since=new_since
+    )
+    if not dedupe:
+        return [job.to_dict(detail=detail) for job in jobs]
     return [
-        job.to_dict()
-        for job in repository.query(
-            text=text, source=platform, limit=limit, offset=offset, new_since=new_since
-        )
+        _wire(job, detail=detail, collapsed_urls=urls)
+        for job, urls in collapse_duplicates(jobs)
     ]
 
 
@@ -323,6 +447,8 @@ def run_search(
     validation_profile: str = "designer",
     llm_model: str | None = None,
     llm_base_url: str | None = None,
+    detail: bool = False,
+    dedupe: bool = True,
     db: str | Path | None = None,
 ) -> dict[str, Any]:
     """Synchronous façade over :func:`search` — one call, connection managed."""
@@ -339,6 +465,8 @@ def run_search(
         validation_profile=validation_profile,
         llm_model=llm_model,
         llm_base_url=llm_base_url,
+        detail=detail,
+        dedupe=dedupe,
     )
     repository = open_db(db)
     try:
@@ -356,6 +484,7 @@ def utcnow() -> datetime:
 
 __all__ = [
     "SearchRequest",
+    "collapse_duplicates",
     "configured_sources",
     "ingest",
     "open_db",

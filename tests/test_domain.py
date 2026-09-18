@@ -10,6 +10,7 @@ from jobreach.domain import (
     JobPosting,
     SourcePlatform,
     ValidationError,
+    normalize_text,
     resolve_platform,
 )
 
@@ -90,6 +91,48 @@ def test_to_dict_is_json_ready():
     assert payload["source_platform"] == "wantedly"
     assert payload["is_new"] is False
     assert isinstance(payload["scraped_at"], str)
+
+
+def test_to_dict_omits_the_description_unless_asked():
+    """The body text is the payload's bulk, so it is opt-in and never default."""
+    job = make(description="Figma でプロダクトの UI を設計します。")
+    assert "description" not in job.to_dict()
+    assert job.to_dict(detail=True)["description"] == "Figma でプロダクトの UI を設計します。"
+
+
+def test_to_dict_detail_is_null_when_nothing_was_stored():
+    """An absent body is reported as null, not as a missing key.
+
+    The caller asked for the field, so it gets the field — a key that vanished
+    would be indistinguishable from a build that ignores the flag.
+    """
+    assert make().to_dict(detail=True)["description"] is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("  Top Eyes  ", "top eyes"),
+        ("A\u3000B", "a b"),  # the ideographic space collapses to one ASCII space
+        ("ＡＢＣ", "abc"),
+    ],
+)
+def test_normalize_text_folds_width_case_and_whitespace(raw: str, expected: str):
+    assert normalize_text(raw) == expected
+
+
+def test_content_key_groups_one_employer_spelled_several_ways():
+    """These boards differ only in spacing/width; the key has to see through it."""
+    first = make(company="TopEyes", title="UI Designer")
+    second = make(company="ＴｏｐＥｙｅｓ", title=" ui   designer ")
+    third = make(company=" topeyes ", title="UI Designer")
+    assert first.content_key == second.content_key == third.content_key
+
+
+def test_content_key_separates_boards_and_real_differences():
+    assert make(source_platform="wantedly").content_key != make(source_platform="indeed").content_key
+    assert make(title="UI Designer").content_key != make(title="UX Designer").content_key
+    assert make(company="Acme").content_key != make(company="Acme Corp").content_key
 
 
 def test_from_dict_defaults_optional_fields():
