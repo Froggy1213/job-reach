@@ -78,7 +78,21 @@ run, so portability is a product feature rather than a nicety. What that costs:
 - a tool is missing from `skills/job-search/SKILL.md`;
 - a `ctx.register_*` method is used that `PluginContext` does not define;
 - the skill's name ≠ its directory, its description > 60 chars, it lacks
-  `## When to Use`, or its directory holds a forbidden file.
+  `## When to Use`, or its directory holds a forbidden file;
+- **a `config_schema` key in `plugin.yaml` is not read.** Every key declared
+  there must reach a handler through `ctx.get_config` and be acted on somewhere.
+  A decorated-but-unread setting is a lie to the user: the GUI lists it, nothing
+  obeys it. Adding a key means adding it to `tools.SETTINGS_KEYS` (re-exported as
+  `__init__.SETTINGS_KEYS`) *and* giving it an effect in the same change.
+  Forwarding is not the same as acting: `default_sources` and `note_subfolder`
+  are read by the *engine* through `jobreach.settings` (`JOBREACH_SETTING_*`,
+  because only the plugin process can call `ctx.get_config`), while
+  `default_keyword` and `max_results` are applied in the *handler*, which builds
+  the CLI flags. Either is fine; a key that is forwarded but that no code path
+  ever consults is not;
+- `plugin.yaml`'s `provides_hooks` ≠ the hooks `register(ctx)` registers — a
+  declared hook that is never registered (or vice versa) is a silent
+  observability hole.
 
 When you add a tool, also add it to: `schemas.py`, `tools.py`'s `HANDLERS`,
 `__init__.py`'s description/emoji maps, `plugin.yaml`'s `provides_tools`, and
@@ -120,6 +134,38 @@ uv run --python 3.12 --with pytest --with pyyaml --no-project python -m pytest
 hermes plugins validate .
 hermes plugins doctor . --ci
 ```
+
+The suites a change usually has to answer to, runnable on their own while
+iterating: `tests/test_plugin_contract.py` (manifest ↔ registration
+invariants), `tests/test_tools.py` (handler envelopes, settings plumbing,
+`max_results` defaults), `tests/test_settings.py` (the `JOBREACH_SETTING_*`
+bridge), and `tests/test_platforms.py` (portability). The full-suite command
+above still runs everything.
+
+For the end-to-end path a test fixture tends to fake — registration through a
+`PluginContext`, the real subprocess bridge, and a setting observably reaching
+the engine — run the acceptance harness. It needs no pytest, no network and no
+Hermes import, and it prints one line per assertion with a pass/fail total:
+
+```bash
+python3 tools_acceptance.py .        # exits 1 if any check fails
+```
+
+Then install the edit where Hermes actually reads it — the installed copy under
+`$HERMES_HOME/plugins/job-reach/` is a *snapshot*, not a symlink, so a fix in the
+repo is invisible until it is copied over:
+
+```bash
+rsync -a --delete --exclude=.git --exclude='*cache*' --exclude=__pycache__ \
+      --exclude=.env --filter='protect .env' \
+      ~/My_projects/Job_reach/ ~/.hermes/plugins/job-reach/
+cp skills/job-search/SKILL.md ~/.hermes/skills/productivity/job-reach/SKILL.md
+```
+
+No Hermes restart is needed for engine changes: `tools.py` spawns
+`python -m jobreach` in a fresh subprocess per call, so the next tool call runs
+the new code. Changes to `tools.py`/`schemas.py`/`__init__.py` *do* need one,
+because those load inside Hermes' own process.
 
 To exercise the real end-to-end path (subprocess bridge, SQLite, JSON):
 

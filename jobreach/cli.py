@@ -9,6 +9,11 @@ CLI the real public interface, so it has to be good on its own terms:
   from drifting.
 * failures exit non-zero with the message on stderr, so ``subprocess`` callers
   can distinguish "no results" from "it broke".
+* flags a Hermes setting can answer (``--source``, ``--subfolder``) take their
+  argparse default from :mod:`jobreach.settings`, so a configured
+  ``default_sources``/``note_subfolder`` reaches a bare ``jobreach search`` or
+  ``jobreach note``. An explicit flag still wins, and ``--help`` prints the
+  effective default.
 """
 
 from __future__ import annotations
@@ -21,8 +26,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from . import __version__
-from .config import DEFAULT_LOCATION, NOTE_SUBFOLDER, Sources
+from . import __version__, settings
+from .config import DEFAULT_LOCATION, Sources
 from .domain import PLATFORM_LABELS, SourcePlatform, resolve_platform
 from .errors import JobReachError
 from .logging_setup import setup_logging
@@ -39,11 +44,29 @@ EXIT_USAGE = 2
 # --------------------------------------------------------------------------- #
 
 
+def _default_source_flag() -> str:
+    """The ``--source`` default: the configured boards, else the built-in feed.
+
+    Read through :mod:`jobreach.settings` rather than using
+    ``Sources.parse(None)`` directly, because ``search`` and ``monitor`` must
+    answer "no ``--source``" identically — that is the one place a Hermes
+    ``default_sources`` setting can reach the engine. It is still a plain
+    string here so a bogus value fails as a *usage* error in the handler (see
+    :func:`main`) instead of exploding while the parser is being built.
+    """
+    return ",".join(settings.default_sources())
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="jobreach",
         description="Search Japanese job boards and track what is new.",
     )
+    # Settings are read once per parser build — i.e. once per engine
+    # subprocess — so an edit to ``config.yaml`` is picked up by the next tool
+    # call rather than frozen at import time.
+    default_source = _default_source_flag()
+    default_subfolder = settings.note_subfolder()
     parser.add_argument("--version", action="version", version=f"jobreach {__version__}")
     parser.add_argument(
         "-v", "--verbose", action="store_true",
@@ -59,8 +82,9 @@ def build_parser() -> argparse.ArgumentParser:
                             help="free-text query (omit for the default design feed)")
     search_cmd.add_argument("-l", "--location", default=DEFAULT_LOCATION,
                             help="Wantedly location slug, or 'any' (default: tokyo)")
-    search_cmd.add_argument("-s", "--source", default=None,
-                            help=f"comma list of {', '.join(available_sources())}, or 'all'")
+    search_cmd.add_argument("-s", "--source", default=default_source,
+                            help=f"comma list of {', '.join(available_sources())}, or 'all' "
+                                 f"(default: {default_source})")
     search_cmd.add_argument("-n", "--limit", type=int, default=None,
                             help="cap how many listings are returned (new ones first)")
     search_cmd.add_argument("--new-only", action="store_true",
@@ -111,8 +135,8 @@ def build_parser() -> argparse.ArgumentParser:
     note_cmd.add_argument("--input", default=None,
                           help="read a saved JSON result from this file (default: stdin)")
     note_cmd.add_argument("--vault", default=None, help="Obsidian vault path")
-    note_cmd.add_argument("--subfolder", default=NOTE_SUBFOLDER,
-                          help=f"subfolder inside the vault (default: {NOTE_SUBFOLDER})")
+    note_cmd.add_argument("--subfolder", default=default_subfolder,
+                          help=f"subfolder inside the vault (default: {default_subfolder})")
     note_cmd.add_argument("--json", action="store_true")
 
     monitor_cmd = sub.add_parser(
@@ -121,8 +145,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     monitor_cmd.add_argument("-k", "--keyword", default=None)
     monitor_cmd.add_argument("-l", "--location", default=DEFAULT_LOCATION)
-    monitor_cmd.add_argument("-s", "--source", default="wantedly,linkedin",
-                             help="boards to watch (default: wantedly,linkedin)")
+    monitor_cmd.add_argument("-s", "--source", default=default_source,
+                             help=f"boards to watch (default: {default_source})")
     monitor_cmd.add_argument("--profile", default="designer")
     monitor_cmd.add_argument("--llm-model", default=None)
     monitor_cmd.add_argument("--llm-base-url", default=None)
@@ -148,7 +172,9 @@ def build_parser() -> argparse.ArgumentParser:
                           help="cron expression or interval like '6h' (default: 09:00 daily)")
     cron_cmd.add_argument("--keyword", default=None)
     cron_cmd.add_argument("--location", default=DEFAULT_LOCATION)
-    cron_cmd.add_argument("--source", default="wantedly,linkedin")
+    cron_cmd.add_argument("--source", default=None,
+                          help="boards to watch (default: the configured default_sources, "
+                               "else the built-in feed)")
     cron_cmd.add_argument("--deliver", default=None,
                           help="delivery target: telegram, discord, origin, ...")
     cron_cmd.add_argument("--name", default="job-reach-monitor")

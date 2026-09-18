@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import inspect
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -44,7 +46,13 @@ FORBIDDEN_SKILL_FILES = {"README.md", "CHANGELOG.md", "install.sh", ".env", ".en
 
 
 class RecordingContext:
-    """Stand-in for Hermes' PluginContext that records what gets registered."""
+    """Stand-in for Hermes' PluginContext that records what gets registered.
+
+    ``get_config``/``state`` mirror the documented facade (the real
+    ``PluginState`` is a ``get``/``set`` store with no item access), so a
+    handler or hook that reads a setting or journals a tool call behaves here
+    the way it does inside Hermes instead of erroring the whole module.
+    """
 
     def __init__(self) -> None:
         self.tools: list[dict[str, Any]] = []
@@ -52,6 +60,11 @@ class RecordingContext:
         self.commands: list[dict[str, Any]] = []
         self.cli_commands: list[dict[str, Any]] = []
         self.hooks: list[tuple[str, Any]] = []
+        self.settings: dict[str, Any] = {}
+        #: Every key a handler asked ``get_config`` for, in order. Recording the
+        #: reads is what turns "the key is in a tuple" into "the key is used".
+        self.config_reads: list[str] = []
+        self.state = _RecordingState()
 
     def register_tool(self, **kwargs: Any) -> None:
         self.tools.append(kwargs)
@@ -67,6 +80,29 @@ class RecordingContext:
 
     def register_hook(self, name: str, callback: Any) -> None:
         self.hooks.append((name, callback))
+
+    def get_config(self, key: str, default: Any = None) -> Any:
+        self.config_reads.append(key)
+        return self.settings.get(key, default)
+
+    def has_capability(self, capability: str) -> bool:
+        return False
+
+    def dispatch_tool(self, tool_name: str, args: dict[str, Any], **kwargs: Any) -> str:
+        return json.dumps({"success": True, "tool": tool_name})
+
+
+class _RecordingState:
+    """``ctx.state`` as the guide documents it: ``get(key, default)`` / ``set``."""
+
+    def __init__(self) -> None:
+        self.data: dict[str, Any] = {}
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.data.get(key, default)
+
+    def set(self, key: str, value: Any) -> None:
+        self.data[key] = value
 
 
 @pytest.fixture(scope="module")
@@ -117,9 +153,30 @@ def test_manifest_has_the_required_fields(manifest: dict[str, Any]):
         assert manifest.get(field), f"plugin.yaml is missing {field}"
 
 
-def test_manifest_declares_no_hooks(context: RecordingContext, manifest: dict[str, Any]):
-    assert manifest["provides_hooks"] == []
-    assert context.hooks == []
+def test_every_version_declaration_agrees(manifest: dict[str, Any]):
+    """One release has four places to bump, and three of them used to be forgotten.
+
+    ``jobreach doctor`` reports the engine's own ``__version__`` while
+    ``hermes plugins list`` reports the manifest's, so a skew does not stay
+    hidden — it makes a single install claim two versions to the same user. The
+    skill and the package metadata are read by other tools again, so they all
+    have to move together.
+    """
+    import jobreach
+
+    declared = str(manifest["version"])
+    engine = jobreach.__version__
+    assert engine == declared, f"jobreach.__version__ {engine!r} != plugin.yaml {declared!r}"
+
+    project = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert f'version = "{declared}"' in project, (
+        f"pyproject.toml's [project].version does not match plugin.yaml's {declared}"
+    )
+
+    frontmatter = skill_frontmatter()
+    assert str(frontmatter["version"]) == declared, (
+        f"SKILL.md version {frontmatter['version']!r} != plugin.yaml {declared!r}"
+    )
 
 
 def test_manifest_provides_tools_matches_registration(
@@ -138,6 +195,156 @@ def test_only_plugin_context_methods_that_hermes_defines_are_used(plugin):
     assert used, "expected the plugin to register something"
     for method in set(used):
         assert f"def {method}(" in source, f"PluginContext has no {method}()"
+
+
+# --------------------------------------------------------------------------- #
+# The rules the guide states explicitly
+#
+# These are the invariants a plugin author is *told* to keep: the manifest must
+# describe what is registered, a declared setting must be read, and a hook
+# callback must accept the full payload. Where a check needs Hermes' own source
+# (the hook list, the capability registry) it skips cleanly when the checkout
+# is absent, because the plugin must be testable on a machine without Hermes.
+# --------------------------------------------------------------------------- #
+
+#: Where a Hermes checkout keeps the two files whose contents define the contract.
+HERMES_CHECKOUT = Path.home() / ".hermes" / "hermes-agent"
+HERMES_PLUGINS_SOURCE = HERMES_CHECKOUT / "hermes_cli" / "plugins.py"
+HERMES_CAPABILITY_SOURCES = (
+    HERMES_CHECKOUT / "plugin_capabilities.py",
+    HERMES_CHECKOUT / "hermes_cli" / "plugin_capabilities.py",
+)
+
+
+def accepts_var_kwargs(callback: Any) -> bool:
+    """Mirror of ``hermes_cli/plugin_dev.py``'s check for ``**kwargs``."""
+    try:
+        parameters = inspect.signature(callback).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters)
+
+
+def hermes_source(path: Path) -> str | None:
+    return path.read_text(encoding="utf-8") if path.exists() else None
+
+
+def hermes_valid_hooks() -> set[str] | None:
+    """Hook names from the checkout's ``VALID_HOOKS`` set, or ``None`` when absent."""
+    source = hermes_source(HERMES_PLUGINS_SOURCE)
+    if source is None:
+        return None
+    block = re.search(r"VALID_HOOKS: Set\[str\] = \{(.*?)\n\}", source, re.S)
+    if block is None:
+        return None
+    # Comments inside the set literal quote example values ("ok", "idle"), so
+    # strip them before harvesting the names.
+    return set(re.findall(r'"([\w.]+)"', re.sub(r"#.*", "", block.group(1)))) or None
+
+
+def hermes_valid_capability_ids() -> set[str] | None:
+    """Capability ids from the checkout, or ``None`` when it is not there.
+
+    The spec names ``~/.hermes/hermes-agent/plugin_capabilities.py``; the
+    current checkout keeps the same module under ``hermes_cli/``, so both are
+    tried before giving up.
+    """
+    for path in HERMES_CAPABILITY_SOURCES:
+        source = hermes_source(path)
+        if source is None:
+            continue
+        block = re.search(r"_CAPABILITY_ROWS = \((.*?)\n\)", source, re.S)
+        if block is None:
+            return None
+        return set(re.findall(r'^\s*\("([\w.]+)"', block.group(1), re.M)) or None
+    return None
+
+
+def test_every_config_schema_key_is_read_by_the_plugin(plugin, handlers, manifest: dict[str, Any]):
+    """A decorated-but-unread setting is a lie to the user.
+
+    ``plugin.yaml``'s ``config_schema`` is what Hermes shows the operator; if a
+    key there never reaches ``ctx.get_config`` the GUI advertises a knob that
+    does nothing.
+
+    Checking membership in ``SETTINGS_KEYS`` is not enough — that tuple is a
+    literal, so a handler that stopped calling ``ctx.get_config`` would keep the
+    test green while the whole feature went dead. This drives a real handler
+    through a context that records what it was asked for and asserts every
+    declared key was actually requested.
+    """
+    declared = tuple(manifest.get("config_schema") or ())
+    assert declared, "plugin.yaml declares no config_schema keys to check"
+
+    ctx = RecordingContext()
+    for handler in handlers.values():
+        asyncio.run(handler({"save": False}, ctx=ctx))
+
+    read = {key for key in ctx.config_reads}
+    unread = sorted(set(declared) - read)
+    assert unread == [], (
+        f"plugin.yaml advertises {unread}, but calling every handler asked "
+        f"ctx.get_config for only {sorted(read)}"
+    )
+
+
+def test_manifest_provides_hooks_matches_registration(
+    context: RecordingContext, manifest: dict[str, Any]
+):
+    """A declared hook that is never registered is a silent observability hole."""
+    declared = manifest.get("provides_hooks")
+    if declared is None:
+        pytest.fail(
+            "plugin.yaml has no provides_hooks key; declare the hooks register(ctx) "
+            "subscribes to (SPEC WS-E item 1)."
+        )
+    registered = [name for name, _callback in context.hooks]
+    assert sorted(declared) == sorted(registered), (
+        f"plugin.yaml declares provides_hooks={declared} but register(ctx) "
+        f"registered {registered}"
+    )
+
+
+def test_the_post_tool_call_callback_accepts_the_full_payload(context: RecordingContext):
+    """The guide: *"a callback with ``**kwargs`` receives the complete current payload"*."""
+    callbacks = [callback for name, callback in context.hooks if name == "post_tool_call"]
+    if not callbacks:
+        pytest.fail(
+            "SPEC WS-A item 6 has not landed: register(ctx) must call "
+            "ctx.register_hook(\"post_tool_call\", record_tool_call) (and SPEC WS-E "
+            "item 1 must declare provides_hooks: [post_tool_call] in plugin.yaml)."
+        )
+    for callback in callbacks:
+        assert accepts_var_kwargs(callback), (
+            f"{getattr(callback, '__name__', callback)!r} must accept **kwargs; the "
+            "plugin doctor rejects a hook callback that does not"
+        )
+        parameters = inspect.signature(callback).parameters
+        for field_name in ("tool_name", "args", "result", "task_id"):
+            assert field_name in parameters, (
+                f"the post_tool_call callback is missing the documented "
+                f"{field_name!r} field"
+            )
+
+
+def test_every_registered_hook_is_a_hook_hermes_fires(context: RecordingContext):
+    valid = hermes_valid_hooks()
+    if valid is None:
+        pytest.skip("Hermes source checkout not available")
+    unknown = sorted({name for name, _ in context.hooks} - valid)
+    assert unknown == [], f"register(ctx) subscribes to hooks Hermes does not fire: {unknown}"
+
+
+def test_manifest_is_v2_and_declares_only_known_capabilities(manifest: dict[str, Any]):
+    assert manifest.get("manifest_version") == 2, "manifest v2 is the documented shape"
+    capabilities = manifest.get("capabilities")
+    if not capabilities:
+        return  # absent means "declares none", which is the honest default here
+    valid = hermes_valid_capability_ids()
+    if valid is None:
+        pytest.skip("Hermes source checkout not available")
+    unknown = sorted(set(capabilities) - valid)
+    assert unknown == [], f"plugin.yaml declares capabilities Hermes cannot grant: {unknown}"
 
 
 # --------------------------------------------------------------------------- #
@@ -164,6 +371,61 @@ def test_schemas_are_well_formed(schemas: list[dict[str, Any]]):
         assert parameters["type"] == "object"
         assert isinstance(parameters.get("properties"), dict)
         assert isinstance(parameters.get("required", []), list)
+
+
+def test_every_handler_is_async_and_accepts_kwargs(handlers: dict[str, Any]):
+    """The guide's handler contract: ``async def handler(args, **kwargs) -> str``."""
+    for name, handler in handlers.items():
+        assert inspect.iscoroutinefunction(handler), f"{name} must be async"
+        parameters = inspect.signature(handler).parameters
+        assert any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()), (
+            f"{name} must accept **kwargs: Hermes passes extra context (the plugin "
+            "context, settings) and a signature without **kwargs breaks on the next "
+            "release instead of opting into additive data"
+        )
+
+
+def test_schema_descriptions_are_specific_enough_for_a_model(schemas: list[dict[str, Any]]):
+    """The guide's *"vague description"* mistake: the description IS the trigger."""
+    for schema in schemas:
+        description = schema.get("description", "")
+        assert isinstance(description, str) and len(description.strip()) >= 40, (
+            f"{schema['name']} needs a description the model can act on, not {description!r}"
+        )
+        for property_name, spec in schema["parameters"].get("properties", {}).items():
+            assert str(spec.get("description", "")).strip(), (
+                f"{schema['name']}.{property_name} has no description; the model cannot "
+                "fill in an argument it cannot read about"
+            )
+
+
+def test_nested_item_properties_are_described_too(schemas: list[dict[str, Any]]):
+    """``job_ingest``'s ``jobs[]`` fields are declared inline, and the model reads them."""
+    missing = []
+    for schema in schemas:
+        for property_name, spec in schema["parameters"].get("properties", {}).items():
+            items = spec.get("items") if isinstance(spec, dict) else None
+            for item_name, item_spec in (items or {}).get("properties", {}).items():
+                if not str(item_spec.get("description", "")).strip():
+                    missing.append(f"{schema['name']}.{property_name}[].{item_name}")
+    assert missing == [], (
+        "these nested item properties have no description: "
+        + ", ".join(missing)
+        + ". They are declared arguments the model fills in, so the guide's "
+        "'vague description' rule covers them: give each a one-line description "
+        "in schemas.py (the top-level properties all have one). If the team "
+        "decides only top-level properties are in scope, narrow this test to "
+        "schema['parameters']['properties'] — but the fix is five short lines."
+    )
+
+
+def test_every_schema_name_is_declared_in_the_manifest(
+    schemas: list[dict[str, Any]], manifest: dict[str, Any]
+):
+    declared = set(manifest.get("provides_tools") or ())
+    assert declared, "plugin.yaml declares no provides_tools"
+    for schema in schemas:
+        assert schema["name"] in declared, f"{schema['name']} is missing from provides_tools"
 
 
 def test_every_tool_is_documented_in_the_skill(schemas: list[dict[str, Any]]):
@@ -300,6 +562,51 @@ def test_install_cron_reports_a_missing_hermes(
         install_cron()
 
 
+def _fake_cron_create(refused: list[str], calls: list[list[str]]):
+    """Stand in for `hermes cron create`, refusing the arguments in *refused*."""
+
+    def run(command: list[str], **_kwargs: Any) -> Any:
+        calls.append(command)
+        argument = command[command.index("--monitor-script") + 1]
+        if argument in refused:
+            return subprocess.CompletedProcess(
+                command, 1, "", "Script path must be relative to ~/.hermes/scripts/"
+            )
+        return subprocess.CompletedProcess(command, 0, "created", "")
+
+    return run
+
+
+def test_install_cron_hands_hermes_a_bare_monitor_script_name(
+    data_home: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Hermes rejects an absolute ``--monitor-script``: it resolves the path
+    under its own scripts directory. Passing the plugin's absolute path made
+    `job_cron` fail outright on macOS, so the bare name is what must go out —
+    and an older Hermes that insists on the absolute path must still work.
+    """
+    from jobreach.install import MONITOR_SCRIPT_NAME, install_cron
+
+    monkeypatch.setattr("jobreach.install.shutil.which", lambda _name: "hermes")
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr("jobreach.install.subprocess.run", _fake_cron_create([], calls))
+    payload = install_cron()
+    assert payload["created"] is True
+    assert calls[0][calls[0].index("--monitor-script") + 1] == MONITOR_SCRIPT_NAME
+
+    # An older Hermes refuses the bare name: the absolute path is tried second.
+    calls = []
+    monkeypatch.setattr(
+        "jobreach.install.subprocess.run", _fake_cron_create([MONITOR_SCRIPT_NAME], calls)
+    )
+    payload = install_cron()
+    assert payload["created"] is True
+    assert len(calls) == 2
+    assert calls[1][calls[1].index("--monitor-script") + 1].endswith(MONITOR_SCRIPT_NAME)
+    assert Path(payload["monitor_script"]).exists()
+
+
 def test_command_line_quoting_matches_the_platform(monkeypatch: pytest.MonkeyPatch):
     """A printed command must be pasteable into the shell the user is in."""
     from jobreach.install import command_line
@@ -343,6 +650,39 @@ def load_python_file(path: Path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_install_cron_only_bakes_boards_the_caller_actually_named(data_home: Path):
+    """A scheduled run must be able to follow ``default_sources``.
+
+    The cron job is installed once and then runs unattended, so a ``--source``
+    literal baked into its monitor script outranks the setting forever: the user
+    changes which boards they want watched and the job they installed last month
+    keeps polling the old set. Omission is therefore the default, and the monitor
+    resolves its own settings-backed default at run time.
+
+    An explicit selection still has to be honoured — the caller asked for those
+    boards on purpose, and the setting must not silently override them.
+    """
+    from jobreach.install import install_cron, install_monitor_script
+
+    default_script = load_python_file(install_monitor_script(["--location", "tokyo"]))
+    assert "--source" not in default_script.ARGS
+
+    chosen_script = load_python_file(
+        install_monitor_script(["--location", "tokyo", "--source", "green"])
+    )
+    assert chosen_script.ARGS[-2:] == ["--source", "green"]
+
+    # And the callers must not reintroduce a literal: `job_cron` forwards the
+    # caller's value verbatim, which is ``None`` when the model omitted it.
+    import inspect
+
+    signature = inspect.signature(install_cron)
+    assert signature.parameters["sources"].default is None, (
+        "install_cron must default to None so `monitor`'s settings-backed "
+        "default decides; a literal default silently outranks default_sources"
+    )
 
 
 # --------------------------------------------------------------------------- #

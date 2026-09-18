@@ -76,6 +76,34 @@ def test_sources_default():
     assert Sources.parse().as_list() == list(DEFAULT_SOURCES)
 
 
+def test_sources_parse_none_is_still_the_built_in_default(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """``None`` keeps meaning ``DEFAULT_SOURCES``, even with a configured default.
+
+    The configured boards are the *call site's* business: the CLI's ``--source``
+    default and ``pipeline``'s request factory both go through
+    ``jobreach.settings.default_sources``. Keeping that out of here means a
+    caller that explicitly asks for the built-in feed still gets it, and this
+    leaf module never depends on the environment.
+    """
+    monkeypatch.setenv("JOBREACH_SETTING_DEFAULT_SOURCES", "indeed")
+    assert Sources.parse(None).as_list() == list(DEFAULT_SOURCES)
+    assert Sources.parse().as_list() == list(DEFAULT_SOURCES)
+
+
+def test_config_does_not_import_settings():
+    """The dependency runs one way: ``settings`` reads ``config``, never the reverse.
+
+    A ``config`` → ``settings`` import would close a cycle through
+    ``pipeline``/``cli`` and make ``Sources.parse(None)`` environment-dependent
+    (see the test above).
+    """
+    from jobreach import config
+
+    assert not hasattr(config, "settings")
+
+
 def test_sources_parses_a_comma_string():
     assert Sources.parse("wantedly, linkedin").as_list() == ["wantedly", "linkedin"]
 

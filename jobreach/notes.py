@@ -7,6 +7,11 @@ a ``🏷️ NEW`` badge on fresh listings — so existing notes stay consistent.
 
 Rendering is pure string work with no Obsidian dependency: a vault is just a
 directory containing ``.obsidian``, and a note is just Markdown.
+
+Where a note lands is *not* decided here: the subfolder default comes from
+:mod:`jobreach.settings`, the same resolver the CLI's ``--subfolder`` flag
+defaults to, so a note written by the CLI and one written by an in-process
+caller cannot end up in different folders.
 """
 
 from __future__ import annotations
@@ -17,12 +22,26 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .config import NOTE_SUBFOLDER, find_vault
+from . import settings
+from .config import find_vault
 from .domain import PLATFORM_LABELS
 from .errors import ConfigError
 
 #: Characters that are unsafe or awkward in a filename.
 _UNSAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _resolve_subfolder(subfolder: str | None) -> str:
+    """The folder to write into: an explicit value, else the configured default.
+
+    ``None`` means "the caller did not choose" and asks
+    :func:`jobreach.settings.note_subfolder` — the same resolver the CLI's
+    ``--subfolder`` default comes from, whose own last resort is
+    ``config.NOTE_SUBFOLDER``. An explicit value is honoured as given; ``""``
+    therefore still means the vault root, so the flag remains able to override
+    a setting rather than being overridden by it.
+    """
+    return settings.note_subfolder() if subfolder is None else subfolder
 
 
 def slugify(value: str, *, limit: int = 60) -> str:
@@ -38,10 +57,13 @@ def note_path(
     keyword: str | None,
     location: str | None,
     vault: str | Path | None = None,
-    subfolder: str = NOTE_SUBFOLDER,
+    subfolder: str | None = None,
     when: datetime | None = None,
 ) -> Path:
-    """Compute the note's path: ``<vault>/<subfolder>/YYYY-MM-DD - kw - loc.md``."""
+    """Compute the note's path: ``<vault>/<subfolder>/YYYY-MM-DD - kw - loc.md``.
+
+    *subfolder* defaults to the configured one (see :func:`_resolve_subfolder`).
+    """
     root = Path(vault).expanduser() if vault else find_vault()
     if root is None:
         raise ConfigError(
@@ -50,7 +72,7 @@ def note_path(
         )
     stamp = (when or datetime.now(UTC)).strftime("%Y-%m-%d")
     name = f"{stamp} - {slugify(keyword or 'design roles')} - {slugify(location or 'any', limit=30)}.md"
-    return root / subfolder / name
+    return root / _resolve_subfolder(subfolder) / name
 
 
 def render_note(result: Mapping[str, Any], *, generated_at: datetime | None = None) -> str:
@@ -128,9 +150,13 @@ def write_note(
     keyword: str | None = None,
     location: str | None = None,
     vault: str | Path | None = None,
-    subfolder: str = NOTE_SUBFOLDER,
+    subfolder: str | None = None,
 ) -> Path:
-    """Render *result* and write it into the vault. Returns the note's path."""
+    """Render *result* and write it into the vault. Returns the note's path.
+
+    *subfolder* is passed through to :func:`note_path`, which applies the
+    configured default when it is ``None``.
+    """
     query = result.get("query") or {}
     target = note_path(
         keyword=keyword or query.get("keyword"),

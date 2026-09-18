@@ -38,7 +38,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -50,6 +50,8 @@ from .platforms import uv_candidates, venv_bin_dir
 from .platforms import venv_python as venv_python_path
 from .proc import run_captured
 from .scrapers.base import PLAYWRIGHT_HINT
+from .settings import apply_default_settings
+from .settings import describe as describe_settings
 
 logger = get_logger("runtime")
 
@@ -121,17 +123,27 @@ def engine_argv() -> list[str]:
     return [python, "-m", "jobreach"]
 
 
-def engine_env() -> dict[str, str]:
+def engine_env(settings: Mapping[str, Any] | None = None) -> dict[str, str]:
     """Environment for a child engine process.
 
     ``PYTHONPATH`` is set explicitly to the plugin directory so the child finds
     ``jobreach`` even when the cwd is not the plugin directory, and Hermes'
     own ``VIRTUAL_ENV`` is dropped so it cannot leak into the child.
+
+    *settings* are mirrored into ``JOBREACH_SETTING_*`` by
+    :func:`jobreach.settings.apply_default_settings`, which is how the user's
+    ``plugins.entries.job-reach.settings`` reach a process that can never call
+    ``ctx.get_config``. Passing ``None`` (the default) leaves the environment
+    exactly as it was before settings existed — the CLI, the cron monitor and
+    the smoke test all take that path.
     """
     env = dict(os.environ)
     env["PYTHONPATH"] = str(plugin_dir())
     env.pop("VIRTUAL_ENV", None)
     env["JOBREACH_PLUGIN_DIR"] = str(plugin_dir())
+    if settings:
+        written = apply_default_settings(env, settings)
+        logger.debug("mirrored plugin settings into the engine env", extra={"keys": written})
     return env
 
 
@@ -140,6 +152,7 @@ def run_engine(
     *,
     timeout: float = 600.0,
     stdin: str | None = None,
+    settings: Mapping[str, Any] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the engine CLI and capture its output. Never raises on exit code.
 
@@ -148,6 +161,9 @@ def run_engine(
     browser (and its driver processes); killing only the Python child would
     leave Chromium running, and a monitoring cron job that hits this repeatedly
     would accumulate orphans.
+
+    *settings* is forwarded to :func:`engine_env`; the engine reads it back
+    through :mod:`jobreach.settings`.
     """
     argv = [*engine_argv(), *args]
     logger.debug("running engine", extra={"argv": argv})
@@ -156,7 +172,7 @@ def run_engine(
         timeout=timeout,
         stdin=stdin,
         cwd=plugin_dir(),
-        env=engine_env(),
+        env=engine_env(settings),
     )
 
 
@@ -449,6 +465,7 @@ def diagnostics() -> dict[str, Any]:
         "python_executable": sys.executable,
         "engine_interpreter": python,
         "engine_interpreter_source": source,
+        "settings": describe_settings(),
         "browser_ready": backend_ready,
         "backend": backends,
         "plugin_dir": str(plugin_dir()),

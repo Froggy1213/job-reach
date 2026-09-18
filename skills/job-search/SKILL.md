@@ -1,7 +1,7 @@
 ---
 name: job-search
 description: Find jobs on Japanese boards and track what is new.
-version: 2.3.0
+version: 2.4.0
 author: Froggy1213
 license: MIT
 platforms: [macos, linux, windows]
@@ -56,6 +56,14 @@ server is involved. `job_status` reports exactly what this machine has.
 | `job_status` | Store counts, last run, browser backend, board readiness. |
 | `job_setup` | One-time runtime install (adopts Scrapling, or builds Playwright). |
 | `job_cron` | Schedule recurring monitoring through `hermes cron`. |
+
+`job_search` and `job_list` fall back to the plugin's configured `max_results`
+when the call passes no `limit`; with nothing configured the engine's own
+default applies (every match for a search, 25 for a listing), so pass `limit`
+when you want a specific count — an explicit value always wins. The same Hermes
+settings (`plugins.entries.job-reach.settings.*`) supply `default_keyword`,
+`default_sources` and `note_subfolder`; they only fill in for an argument the
+call omits.
 
 ## Board coverage — read this before choosing sources
 
@@ -271,7 +279,11 @@ user's exact ask, similar roles, per-board caveats): the tables alone are raw da
     returns recruiter/office noise for `グラフィックデザイナー` — verify a sample of
     titles before believing a board matched, and drop the board from the note if it
     did not. Likewise Green's keyword search is fuzzy: it returns sales/HR roles for
-    `DTP` and `グラフィックデザイナー`, so re-filter titles before reporting.
+    `DTP` and `グラフィックデザイナー`, so re-filter titles before reporting. With
+    `validation="local"` this shows up as a board that scraped 40 rows and kept
+    **zero**: it is then absent from `summary.by_platform` altogether, which reads
+    like a board that never ran. Check the filter block's `total`/`rejected` before
+    telling the user a board returned nothing.
 15. **Trusting a Mynavi occupation code.** The code is a *company-level* tag: the
     board files a company under WEBデザイナー if it recruits designers anywhere, and
     the card then lists every course that company runs. On live 415/580/620 results

@@ -69,6 +69,57 @@ ask for rather than something you perform.
 
 ---
 
+## What changed in 2.4
+
+**The plugin's own advertised settings now do something, and every failure the
+model sees is a sentence it can act on.** This release came out of auditing the
+plugin against the official [Hermes plugin developer
+guide](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins); the
+reasoning and the before/after evidence are in
+`docs/hermes-plugin-compliance.md`.
+
+- **Settings are read, not just declared.** `plugin.yaml` had advertised
+  `default_keyword`, `default_sources` and `note_subfolder` for two releases
+  while no code path read them — the setting appeared in `hermes plugins list`,
+  the user set it, and nothing happened. They are now read through
+  `ctx.get_config` on every call and forwarded to the engine subprocess through
+  the new `jobreach/settings.py` (`JOBREACH_SETTING_*`), so a `config.yaml` edit
+  takes effect on the next tool call with no restart. `max_results` joins them.
+  Precedence is fixed and tested: **explicit tool argument → configured setting →
+  built-in default**, and a blank or unset key means "use the default", never
+  "override with nothing".
+- **The cron job no longer freezes the board list.** `install-cron` used to bake
+  `--source wantedly,linkedin` into the generated monitor script, so a scheduled
+  job installed before a `default_sources` change kept polling the old boards
+  forever. It now omits `--source` unless the caller named boards, and each
+  scheduled run resolves the setting at run time.
+- **Handlers cannot raise.** `_invoke` caught three exception types and let the
+  rest escape into Hermes' tool loop. It now catches everything and answers with
+  `{"success": false, "error": …, "hint": …}`, rejects a non-object JSON payload,
+  and coerces `limit`/`offset`/`recent_runs` before they become CLI flags.
+- **Errors became instructions.** A bad `limit` used to return an argparse
+  `usage:` dump, and a CLI crash returned a full traceback complete with the
+  plugin's file paths — while the `hint` blamed Playwright for everything. The
+  messages are now typed (`limit must be an integer, got 'many'`), a traceback
+  collapses to `the engine crashed: TypeError: …`, and the hint matches the
+  actual failure.
+- **`job_status` can say what actually ran.** The plugin subscribes to
+  `post_tool_call` and journals its own calls (`{tool, at, ok, detail}`, newest
+  first, last 20, lock-guarded because the hook fires concurrently) in
+  `ctx.state`; `job_status` returns them as `recent_tool_calls`. Tool calls from
+  other plugins are ignored, and a broken state facade degrades to "not
+  recorded" rather than raising.
+- **The test suite guards the guide's rules.** Contract tests now pin the
+  manifest ↔ registration relation for hooks as well as tools, that every
+  `config_schema` key is actually read, that every schema property (including
+  nested `items.properties`) is described for the model, and that the version
+  declarations in `plugin.yaml`, `jobreach/__init__.py`, `pyproject.toml` and
+  `SKILL.md` never drift apart. `tests/test_docs_examples.py` loads a frozen copy
+  of the plugin from an isolated `HERMES_HOME`, and `tools_acceptance.py` drives
+  the real subprocess bridge end to end. 448 tests, from 313.
+
+---
+
 ## What changed in 2.3
 
 **The plugin is portable to any Hermes, including on Windows** — and the README
@@ -369,6 +420,48 @@ Never inside the plugin directory, so `hermes plugins update` cannot wipe it.
 ## Configuration
 
 Everything is optional; see `.env.example`.
+
+### Settings (`config.yaml`)
+
+Four user-visible knobs live in Hermes' `config.yaml` (`$HERMES_HOME/config.yaml`,
+by default `~/.hermes/config.yaml`) under the plugin's own namespace, which
+Hermes validates against `config_schema` in `plugin.yaml`. They are read
+through `ctx.get_config` on every tool call, so an edit takes effect on the next
+call — no Hermes restart.
+
+| Setting | `config.yaml` path | Default | Effect |
+|---------|--------------------|---------|--------|
+| `default_keyword` | `plugins.entries.job-reach.settings.default_keyword` | `""` | Keyword `job_search` uses when the caller passes none. Empty means the built-in design feed. |
+| `default_sources` | `plugins.entries.job-reach.settings.default_sources` | `[]` | Boards searched when the caller passes no `sources`. Empty means the built-in board set (`wantedly`, `mynavi2027`, `linkedin`). |
+| `note_subfolder` | `plugins.entries.job-reach.settings.note_subfolder` | `"job-searches"` | Subfolder inside the Obsidian vault that `job_note` writes into. |
+| `max_results` | `plugins.entries.job-reach.settings.max_results` | unset | How many listings `job_list` returns when no `limit` is passed, and the limit `job_search` falls back to. Unset means the engine's own default — all matches for a search — so set it if you want searches capped. An explicit `limit` always wins. |
+
+```yaml
+plugins:
+  entries:
+    job-reach:
+      settings:
+        default_keyword: "frontend engineer"
+        default_sources: [wantedly, green, daijob]
+        note_subfolder: job-searches
+        max_results: 50
+```
+
+**An explicit tool argument always beats the setting.** A call that passes
+`keyword`, `sources`, `limit` or `subfolder` is obeyed verbatim; the setting
+only fills the gap when the caller omits the argument. A key left out of
+`config.yaml` means "use the default", never "override with nothing".
+
+### Environment variables
+
+`JOBREACH_SETTING_*` (`JOBREACH_SETTING_DEFAULT_KEYWORD`,
+`JOBREACH_SETTING_DEFAULT_SOURCES`, `JOBREACH_SETTING_NOTE_SUBFOLDER`,
+`JOBREACH_SETTING_MAX_RESULTS`) is the **internal bridge**, not a user-facing
+knob: the plugin process mirrors the settings it read into those variables so
+the engine subprocess (which cannot reach `ctx.get_config`) can see them. Set
+the `config.yaml` keys above instead. The variables listed here are genuine
+user knobs — `JOBREACH_HOME`, `JOBREACH_DB` and the rest are read directly and
+remain supported.
 
 | Variable | Purpose |
 |----------|---------|

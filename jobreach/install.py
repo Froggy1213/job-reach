@@ -179,12 +179,21 @@ def install_cron(
     schedule: str = "0 9 * * *",
     keyword: str | None = None,
     location: str = "tokyo",
-    sources: str = "wantedly,linkedin",
+    sources: str | None = None,
     deliver: str | None = None,
     name: str = "job-reach-monitor",
     prompt: str = DEFAULT_CRON_PROMPT,
 ) -> dict[str, Any]:
-    """Create a Hermes cron job that watches the boards and reports changes."""
+    """Create a Hermes cron job that watches the boards and reports changes.
+
+    *sources* is baked into the generated monitor script only when the caller
+    actually named the boards. ``None`` — the default — leaves ``--source`` out
+    of the script entirely, so each scheduled run resolves the boards through
+    ``monitor``'s own settings-backed default. Baking a literal list here would
+    silently outrank a ``default_sources`` setting: the user changes which boards
+    they want watched, and the cron job they installed earlier keeps polling the
+    old set forever.
+    """
     hermes = shutil.which("hermes")
     if hermes is None:
         raise ConfigError(
@@ -195,20 +204,37 @@ def install_cron(
     monitor_args: list[str] = []
     if keyword:
         monitor_args += ["--keyword", keyword]
-    monitor_args += ["--location", location, "--source", sources]
+    monitor_args += ["--location", location]
+    if sources:
+        monitor_args += ["--source", sources]
     monitor = install_monitor_script(monitor_args)
 
-    command = [
-        hermes, "cron", "create", schedule, prompt,
-        "--name", name,
-        "--monitor-script", str(monitor),
-        "--skill", "job-reach:job-search",
-        "--workdir", str(plugin_dir()),
-    ]
-    if deliver:
-        command += ["--deliver", deliver]
+    # Hermes resolves ``--monitor-script`` *under* its own scripts directory and
+    # rejects an absolute path outright ("Script path must be relative to
+    # ~/.hermes/scripts/"). The generated script lands in exactly that directory,
+    # so the bare filename is the argument that works — and it survives a moved
+    # HERMES_HOME, which a baked-in absolute path would not. Older builds only
+    # accepted the absolute path, hence the fallback: try the form this Hermes
+    # wants, and let the other one try if the first is refused. Re-running
+    # `cron create` is safe because a refused create writes nothing.
+    command: list[str] = []
+    result: subprocess.CompletedProcess[str] | None = None
+    for monitor_arg in (MONITOR_SCRIPT_NAME, str(monitor)):
+        command = [
+            hermes, "cron", "create", schedule, prompt,
+            "--name", name,
+            "--monitor-script", monitor_arg,
+            "--skill", "job-reach:job-search",
+            "--workdir", str(plugin_dir()),
+        ]
+        if deliver:
+            command += ["--deliver", deliver]
 
-    result = subprocess.run(command, capture_output=True, text=True)
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode == 0:
+            break
+
+    assert result is not None  # the loop above always runs at least once
     created = result.returncode == 0
     message = (
         f"Cron job {name!r} created: {schedule}"

@@ -6,6 +6,7 @@ same way the subprocess-based tool layer does.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -14,6 +15,24 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+# Imported after the path fix: ``jobreach`` is the plugin's subpackage, not an
+# installed distribution, so it only resolves once the root is on sys.path.
+from jobreach.settings import SETTING_PREFIX  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hide any ``JOBREACH_SETTING_*`` the developer exported in their shell.
+
+    These variables are the plugin→engine settings bridge, so a developer who
+    has been testing the bridge by hand (``export JOBREACH_SETTING_DEFAULT_SOURCES=green``)
+    would otherwise see unrelated assertions change behaviour — the classic
+    "passes on my machine, fails in CI" split. Tests that exercise the bridge set
+    the variables themselves, which overrides this.
+    """
+    for name in [key for key in os.environ if key.startswith(SETTING_PREFIX)]:
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture()

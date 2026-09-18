@@ -1,5 +1,5 @@
 name: job-reach
-version: "2.3.0"
+version: "2.4.0"
 description: >-
   Search Japanese job boards (Wantedly, Indeed, Green, Daijob, Japan Dev,
   Mynavi 2027, LinkedIn) and track which listings are new since the last run.
@@ -84,18 +84,43 @@ provides_tools:
   - job_setup
   - job_cron
 
-provides_hooks: []
+# The one hook this plugin subscribes to: it records this plugin's own tool
+# calls (dump path, counts, outcome) so `job_status` can report what actually
+# ran. Every other tool call is ignored; the callback never raises.
+provides_hooks:
+  - post_tool_call
 
+# User-visible settings, resolved by Hermes under
+# `plugins.entries.job-reach.settings`. The plugin reads them through
+# `ctx.get_config` on every tool call and forwards them to the engine
+# subprocess through `jobreach.settings` — an explicit tool argument always
+# wins, and a key left out means "use the default below".
 config_schema:
   default_keyword:
     type: str
     required: false
+    default: ""
     description: "Query used when the caller passes no keyword. Empty means the built-in design feed."
   default_sources:
     type: list
     required: false
+    default: []
     description: "Boards searched by default. Defaults to [wantedly, mynavi2027, linkedin]."
   note_subfolder:
     type: str
     required: false
+    default: "job-searches"
     description: "Subfolder inside the Obsidian vault for generated notes. Default: job-searches"
+  max_results:
+    type: int
+    required: false
+    default: 25
+    # Deliberately a *default*, not a ceiling: an explicit `limit` is obeyed.
+    # It applies to `job_list` only. `job_search` passes no `-n` at all when
+    # neither the caller nor this setting supplies one, which is what the
+    # engine's "omit for all" means — so a fresh install returns every match,
+    # and setting this is how a user caps that.
+    description: >-
+      How many listings job_list returns when the caller passes no limit, and
+      the limit job_search falls back to. Unset means the engine's own default
+      (all matches for a search). An explicit `limit` argument always wins.

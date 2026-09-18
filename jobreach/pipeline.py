@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from . import settings
 from .config import DEFAULT_LOCATION, Sources
 from .domain import JobPosting, SourcePlatform, resolve_platform
 from .errors import JobReachError
@@ -39,13 +40,26 @@ from .store import JobRepository, normalize_url, open_repository
 logger = get_logger("pipeline")
 
 
+def configured_sources() -> Sources:
+    """Board selection for a request that names none.
+
+    Routed through :func:`jobreach.settings.default_sources` rather than
+    ``Sources.parse(None)`` so a configured ``default_sources`` reaches every
+    no-argument caller — the CLI's ``search``/``monitor``, the Hermes tools and
+    :func:`run_search` — from one place. ``Sources.parse(None)`` still means
+    :data:`jobreach.config.DEFAULT_SOURCES`; that is the last fallback *inside*
+    the settings resolver, not a second default of its own.
+    """
+    return Sources.parse(settings.default_sources())
+
+
 @dataclass(slots=True)
 class SearchRequest:
     """Everything one search run needs. Defaults mirror the CLI defaults."""
 
     keyword: str | None = None
     location: str | None = DEFAULT_LOCATION
-    sources: Sources = field(default_factory=Sources.parse)
+    sources: Sources = field(default_factory=configured_sources)
     limit: int | None = None
     new_only: bool = False
     save: bool = True
@@ -315,7 +329,7 @@ def run_search(
     request = SearchRequest(
         keyword=keyword,
         location=location,
-        sources=Sources.parse(sources),
+        sources=Sources.parse(sources) if sources is not None else configured_sources(),
         limit=limit,
         new_only=new_only,
         save=save,
@@ -342,6 +356,7 @@ def utcnow() -> datetime:
 
 __all__ = [
     "SearchRequest",
+    "configured_sources",
     "ingest",
     "open_db",
     "query",

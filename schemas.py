@@ -43,8 +43,9 @@ _SEARCH = {
                 "type": "string",
                 "description": (
                     "Free-text query, e.g. 'frontend engineer' or 'デザイナー'. "
-                    "Omit for the default design feed. Recommended with "
-                    "sources=['wantedly'] or the fast boards."
+                    "Omit to use the plugin's configured default keyword, or the "
+                    "built-in design feed when none is configured. Recommended "
+                    "with sources=['wantedly'] or the fast boards."
                 ),
             },
             "location": {
@@ -61,15 +62,20 @@ _SEARCH = {
                 "items": {"type": "string"},
                 "description": (
                     "Boards to search: 'wantedly', 'indeed', 'green', 'daijob', "
-                    "'japandev', 'mynavi2027', 'linkedin'. Default: "
-                    "['wantedly','mynavi2027','linkedin'] (the design feed). "
-                    "For an English-language search add 'japandev' or 'daijob'; "
-                    "for the widest market add 'indeed'."
+                    "'japandev', 'mynavi2027', 'linkedin'. Omit to use the "
+                    "plugin's configured default sources (the design feed "
+                    "['wantedly','mynavi2027','linkedin'] when none is "
+                    "configured). For an English-language search add 'japandev' "
+                    "or 'daijob'; for the widest market add 'indeed'."
                 ),
             },
             "limit": {
                 "type": "integer",
-                "description": "Maximum listings returned (newest and new-first). Omit for all.",
+                "description": (
+                    "Maximum listings returned (newest and new-first). Omit to "
+                    "use the plugin's configured max_results, or for all when "
+                    "none is configured."
+                ),
             },
             "new_only": {
                 "type": "boolean",
@@ -126,11 +132,26 @@ _INGEST = {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "title": {"type": "string"},
-                        "url": {"type": "string"},
-                        "company": {"type": "string"},
-                        "location": {"type": "string"},
-                        "salary": {"type": "string"},
+                        "title": {
+                            "type": "string",
+                            "description": "Job title as shown on the card.",
+                        },
+                        "url": {
+                            "type": "string",
+                            "description": "Absolute listing URL; the dedupe key, so it must be the real one.",
+                        },
+                        "company": {
+                            "type": "string",
+                            "description": "Employer name, if the card shows one.",
+                        },
+                        "location": {
+                            "type": "string",
+                            "description": "Work location, if the card shows one.",
+                        },
+                        "salary": {
+                            "type": "string",
+                            "description": "Salary text exactly as displayed (e.g. '6M-9M JPY').",
+                        },
                         "source_platform": {
                             "type": "string",
                             "description": "Defaults to 'indeed'.",
@@ -172,7 +193,13 @@ _LIST = {
                 "type": "string",
                 "description": "Restrict to one board: wantedly, mynavi_2027, linkedin, indeed.",
             },
-            "limit": {"type": "integer", "description": "How many listings to return (default 25)."},
+            "limit": {
+                "type": "integer",
+                "description": (
+                    "How many listings to return. Default 25 unless the plugin "
+                    "is configured with a different max_results."
+                ),
+            },
             "offset": {"type": "integer", "description": "Skip this many listings (paging)."},
             "new_since": {
                 "type": "string",
@@ -205,7 +232,10 @@ _NOTE = {
             },
             "subfolder": {
                 "type": "string",
-                "description": "Subfolder inside the vault. Default 'job-searches'.",
+                "description": (
+                    "Subfolder inside the vault. Default 'job-searches', or the "
+                    "plugin's configured note_subfolder when one is set."
+                ),
             },
         },
         "required": ["result"],
@@ -289,7 +319,11 @@ _CRON = {
             "location": {"type": "string", "description": "Location slug to watch. Default 'tokyo'."},
             "sources": {
                 "type": "string",
-                "description": "Comma-separated boards to watch. Default 'wantedly,linkedin'.",
+                "description": (
+                    "Comma-separated boards to watch. Omit to use the configured "
+                    "default_sources, so a later settings change is picked up by "
+                    "the schedule instead of being frozen at install time."
+                ),
             },
             "deliver": {
                 "type": "string",
