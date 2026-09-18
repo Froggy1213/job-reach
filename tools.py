@@ -26,7 +26,7 @@ Beyond argv translation this module owns the two things that only exist on the
 plugin side of that bridge:
 
 * **settings** — the engine can never call ``ctx.get_config`` from a subprocess,
-  so :func:`_settings` reads the four ``config_schema`` keys once per call and
+  so :func:`_settings` reads the six ``config_schema`` keys once per call and
   hands them to :func:`jobreach.runtime.run_engine`, which mirrors them into the
   child's environment;
 * **the tool-call journal** — :func:`journal_append` / :func:`journal_read` keep
@@ -663,6 +663,10 @@ async def handle_job_search(params: dict[str, Any], *, ctx: Any = None, **kwargs
 
     ``default_keyword``, ``default_sources`` and ``max_results`` fill in only
     what the caller left out: an argument the model passed always wins.
+    ``default_validation`` / ``default_profile`` are deliberately *not* read
+    here: the argv below leaves ``--validate``/``--profile`` out entirely when
+    the model passed neither, so the engine falls back to the configured
+    default on its own — one place decides, and an explicit argument still wins.
     """
     params = _as_dict(params)
     settings = _settings(ctx)

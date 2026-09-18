@@ -147,7 +147,19 @@ always there; only an explicit argument could switch it on.
   default is used, so a typo in `config.yaml` cannot stop a cron monitor — or a
   search — from running. A blank value still means "plugin default". Every new
   behaviour has its own test; the suite is 503 tests, green.
-- (envelope hygiene entry pending integration)  
+- **Content duplicates collapse before a caller ever counts them.** An employer
+  posting one vacancy as ~30 near-identical cards (routine on Wantedly) read as
+  30 vacancies. A run now folds rows that share a company, title and board into
+  one representative carrying `duplicates` and `duplicate_urls`, and `summary`
+  reports `unique` and `hidden_duplicates` beside the unchanged raw `total`, so
+  a count of "how many jobs" no longer depends on the same job being posted 30
+  times. `dedupe: false` (`--no-dedupe`) returns every card when the individual
+  URLs are what matters.
+- **`detail: true` returns the body text.** The description was scraped, stored
+  and used by the relevance filter, but it never reached the caller — so the
+  only evidence for judging a listing was its title, which is useless on boards
+  that synthesise titles from an occupation code. It is opt-in because it costs
+  context: a page of listings is a page of bodies.
 
 ---
 

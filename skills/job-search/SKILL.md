@@ -62,8 +62,32 @@ when the call passes no `limit`; with nothing configured the engine's own
 default applies (every match for a search, 25 for a listing), so pass `limit`
 when you want a specific count — an explicit value always wins. The same Hermes
 settings (`plugins.entries.job-reach.settings.*`) supply `default_keyword`,
-`default_sources` and `note_subfolder`; they only fill in for an argument the
-call omits.
+`default_sources`, `note_subfolder`, `default_validation` and `default_profile`;
+they only fill in for an argument the call omits.
+
+## Relevance and envelope shape
+
+Three knobs decide what a call actually returns. Two of them have defaults the
+machine may already have configured — read `job_status`'s `runtime.settings`
+before assuming `off`:
+
+- **`validation`** (`off` | `local` | `llm`) with **`profile`** (`designer`,
+  `frontend`, `engineering`, `product`, `any`) — the relevance filter. `off` is
+  the built-in default and returns every raw row; `local` is free and judges
+  title **and body**. Measured on one full seven-board sweep: `off` → 140
+  listings ≈ 91 KB of JSON, `local` + `designer` → 70 listings ≈ 9.5 KB; the
+  difference was Daijob recruiter rows (40 scraped, 0 kept) and unrelated
+  LinkedIn postings. A configured `default_validation`/`default_profile` makes
+  that the default for a bare call; an explicit argument still wins.
+- **`detail`** (default `false`) — adds the stored `description` to every
+  returned listing. Ask for it when the body matters (Mynavi titles are
+  synthesised from an occupation code, so the title proves nothing) and leave it
+  off when you only need to pick a page of listings apart.
+- **`dedupe`** (default `true`) — folds rows sharing a company, title and board
+  into one representative, which carries `duplicates` (how many were folded in)
+  and `duplicate_urls`; `summary` gains `unique` and `hidden_duplicates` while
+  `total` stays raw. Keep it on for "how many vacancies", pass `dedupe=false`
+  when every card's URL matters.
 
 ## Board coverage — read this before choosing sources
 
@@ -171,19 +195,26 @@ Then tell the user: the job only fires while the **Hermes gateway is running**
   "query": {"keyword": "engineer", "location": "tokyo", "sources": ["wantedly", "indeed"]},
   "summary": {
     "total": 16, "new": 16, "saved": 16, "shown": 5,
+    "unique": 9, "hidden_duplicates": 7,
     "by_platform": {"wantedly": {"total": 16, "new": 16}},
     "errors": {}
   },
   "jobs": [
     {"title": "…", "company": "…", "url": "…", "location": "…",
      "source_platform": "wantedly", "source_label": "Wantedly",
-     "salary": null, "is_new": true, "scraped_at": "…", "posted_at": "…"}
+     "salary": null, "is_new": true, "scraped_at": "…", "posted_at": "…",
+     "duplicates": 0, "duplicate_urls": []}
   ]
 }
 ```
 
 - `summary.new` = listings not present in the store before this run;
   `summary.saved` = how many rows were written (0 with `save: false`).
+- `summary.total` stays **raw**; `unique` is what is left after the collapse and
+  `hidden_duplicates` is what the collapse removed. `duplicates`/
+  `duplicate_urls` appear on every listing while `dedupe` is on (its default),
+  and both are absent with `dedupe: false`. `description` appears only with
+  `detail: true`.
 - `summary.errors` maps a failed board → reason. **A partial failure still
   returns the boards that succeeded** — report the failure, keep the results.
 - `jobs` is ordered new-first, then by board and title.
@@ -213,6 +244,9 @@ correct, not a bug. Use `new_only: true` to surface only fresh listings, or
 | What did we collect this week? | `job_list(new_since="2026-09-10T00:00:00+00:00")` |
 | Save the last search to Obsidian | `job_note(result=<the envelope>)` |
 | New-grad design, Mynavi only | `job_search(sources=["mynavi2027"], validation="local", profile="designer")` |
+| Read the bodies of what we already stored | `job_list(limit=10, detail=True)` |
+| Count vacancies rather than cards | `job_search(keyword="…")` — `dedupe` is on by default |
+| Every card, near-copies included | `job_search(keyword="…", dedupe=False)` |
 
 ## One note from several searches
 
