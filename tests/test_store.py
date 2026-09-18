@@ -92,6 +92,20 @@ def test_salary_is_not_overwritten_by_null(db_path: Path):
 # --- queries ---------------------------------------------------------------
 
 
+def test_description_round_trips_and_stays_out_of_the_default_wire_format(
+    db_path: Path,
+):
+    """The body is stored either way; it is only *reported* on request."""
+    body = "Figma でプロダクトの UI を設計します。"
+    with SQLiteJobRepository(db_path) as repo:
+        repo.save_many([job("https://x.test/1", description=body)])
+        (stored,) = repo.query(limit=1)
+
+    assert stored.description == body, "the store keeps the body text"
+    assert "description" not in stored.to_dict()
+    assert stored.to_dict(detail=True)["description"] == body
+
+
 def test_query_filters_by_source_and_text(db_path: Path):
     with SQLiteJobRepository(db_path) as repo:
         repo.save_many(

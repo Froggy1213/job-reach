@@ -33,7 +33,9 @@ _SEARCH = {
         "the OpenCLI Chrome bridge; needs Chrome running). With no keyword it "
         "runs the built-in design-in-Tokyo feed. Listings are deduplicated "
         "against the local database and flagged 'is_new' when this run is the "
-        "first to see them. A live scrape takes 1-90 seconds depending on the "
+        "first to see them; cards that are the same vacancy on the same board "
+        "(same company and title) are collapsed into one, which reports how "
+        "many it absorbed. A live scrape takes 1-90 seconds depending on the "
         "boards — do not retry in a loop."
     ),
     "parameters": {
@@ -80,6 +82,30 @@ _SEARCH = {
             "new_only": {
                 "type": "boolean",
                 "description": "Return only listings not seen in any previous run.",
+            },
+            "detail": {
+                "type": "boolean",
+                "description": (
+                    "Also return each listing's stored description — the body "
+                    "text, so relevance can be judged without opening the card. "
+                    "Default false, and it is expensive: one description can be "
+                    "up to 10,000 characters, so the response can grow by an "
+                    "order of magnitude. Ask for it once the search is narrow "
+                    "(a keyword and one or two boards), not on a wide run."
+                ),
+            },
+            "dedupe": {
+                "type": "boolean",
+                "description": (
+                    "Collapse cards that are the same vacancy on the same board "
+                    "— same company and title, ignoring case and spacing — into "
+                    "one listing. Default true, because one employer often posts "
+                    "one job as dozens of cards. The kept listing is the newest "
+                    "card and reports `duplicates` (how many it absorbed) and "
+                    "`duplicate_urls`; the summary reports `unique` (listings "
+                    "kept) and `hidden_duplicates` (listings collapsed away). "
+                    "Set false only when you specifically need every stored URL."
+                ),
             },
             "save": {
                 "type": "boolean",
@@ -183,7 +209,10 @@ _LIST = {
         "this for questions about what has been collected so far ('what did we "
         "find this week?', 'show me the LinkedIn ones') without hitting the "
         "network. Filter with `text` (substring of title/company/location) and "
-        "`source`."
+        "`source`. Rows that are the same vacancy on the same board (same "
+        "company and title) are collapsed into one by default; collapsing "
+        "happens inside the returned page, so it never hides a row you asked "
+        "to see by paging."
     ),
     "parameters": {
         "type": "object",
@@ -204,6 +233,27 @@ _LIST = {
             "new_since": {
                 "type": "string",
                 "description": "ISO-8601 timestamp; only listings first seen at or after it.",
+            },
+            "detail": {
+                "type": "boolean",
+                "description": (
+                    "Also return each stored listing's description — the body "
+                    "text the scraper saved. Default false, and expensive: one "
+                    "description can be up to 10,000 characters, so combine it "
+                    "with `text` or a small `limit` rather than asking for the "
+                    "whole store's bodies at once."
+                ),
+            },
+            "dedupe": {
+                "type": "boolean",
+                "description": (
+                    "Collapse stored rows that are the same vacancy on the same "
+                    "board — same company and title, ignoring case and spacing. "
+                    "Default true. The kept row is the newest and reports "
+                    "`duplicates` and `duplicate_urls`; the envelope also "
+                    "reports `unique` and `hidden_duplicates`. Set false to "
+                    "receive every stored row."
+                ),
             },
         },
         "required": [],

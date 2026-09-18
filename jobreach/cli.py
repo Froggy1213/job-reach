@@ -98,6 +98,12 @@ def build_parser() -> argparse.ArgumentParser:
                             help="return only listings not seen in a previous run")
     search_cmd.add_argument("--no-save", action="store_true",
                             help="do not touch the database")
+    search_cmd.add_argument("--detail", action="store_true",
+                            help="include each listing's stored description "
+                                 "(costs context: up to 10,000 chars per listing)")
+    search_cmd.add_argument("--no-dedupe", action="store_true",
+                            help="return near-identical cards separately instead of "
+                                 "collapsing them (default: collapse)")
     search_cmd.add_argument("--headful", action="store_true",
                             help="show the browser window (debugging)")
     search_cmd.add_argument("--timeout-ms", type=int, default=30_000)
@@ -133,6 +139,12 @@ def build_parser() -> argparse.ArgumentParser:
     list_cmd.add_argument("-s", "--source", default=None)
     list_cmd.add_argument("-k", "--keyword", default=None,
                           help="substring match on title/company/location")
+    list_cmd.add_argument("--detail", action="store_true",
+                          help="include each listing's stored description "
+                               "(costs context: up to 10,000 chars per listing)")
+    list_cmd.add_argument("--no-dedupe", action="store_true",
+                          help="return near-identical rows separately instead of "
+                               "collapsing them (default: collapse)")
     list_cmd.add_argument("--json", action="store_true")
     list_cmd.add_argument("--db", default=None)
 
@@ -268,6 +280,8 @@ def _cmd_search(args: argparse.Namespace) -> int:
         validation_profile=args.profile,
         llm_model=args.llm_model,
         llm_base_url=args.llm_base_url,
+        detail=args.detail,
+        dedupe=not args.no_dedupe,
     )
     _preflight(request.sources)
     repository = open_db(args.db)
@@ -328,6 +342,8 @@ def _cmd_list(args: argparse.Namespace) -> int:
             source=args.source,
             limit=args.limit,
             offset=args.offset,
+            detail=args.detail,
+            dedupe=not args.no_dedupe,
         )
         total = repository.count(
             source=resolve_platform(args.source) if args.source else None
@@ -335,8 +351,19 @@ def _cmd_list(args: argparse.Namespace) -> int:
     finally:
         repository.close()
 
+    # `unique` counts this page after collapsing, `hidden_duplicates` the rows
+    # that were folded away inside it: the collapse happens after the SQL page
+    # fetch (see `pipeline.query`), so both describe the page `shown` describes.
+    hidden = sum(int(job.get("duplicates") or 0) for job in jobs)
+
     if args.json:
-        _print_json({"total": total, "shown": len(jobs), "jobs": jobs})
+        _print_json({
+            "total": total,
+            "shown": len(jobs),
+            "unique": len(jobs),
+            "hidden_duplicates": hidden,
+            "jobs": jobs,
+        })
     else:
         if not jobs:
             print("No stored listings match.")
@@ -344,8 +371,8 @@ def _cmd_list(args: argparse.Namespace) -> int:
         for job in jobs:
             print(f"  {job['title']}  —  {job['company']}")
             print(f"      {job['location']} · {job['source_label']}")
-            print(f"      {job['url']}")
-        print(f"\n{total} stored listing(s); showing {len(jobs)}.")
+            print(f"      {job['url']}{_duplicate_note(job)}")
+        print(f"\n{total} stored listing(s); showing {len(jobs)}{_hidden_note(hidden)}.")
     return EXIT_OK
 
 
@@ -528,6 +555,25 @@ def _print_json(payload: Any) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def _duplicate_note(job: dict[str, Any]) -> str:
+    """``( +3 duplicates )`` for a collapsed card, nothing for a raw row.
+
+    Text output exists for a human reading a terminal, so the collapse has to be
+    visible there too — otherwise "3 listings" and "30 postings" look the same.
+    """
+    count = int(job.get("duplicates") or 0)
+    if not count:
+        return ""
+    return f"  (+{count} duplicate card{'s' if count > 1 else ''})"
+
+
+def _hidden_note(hidden: int) -> str:
+    """``, 30 duplicate rows hidden`` for a summary line, nothing when clean."""
+    if not hidden:
+        return ""
+    return f", {hidden} duplicate row{'s' if hidden > 1 else ''} hidden"
+
+
 def _print_text(result: dict[str, Any]) -> None:
     query = result["query"]
     summary = result["summary"]
@@ -552,13 +598,19 @@ def _print_text(result: dict[str, Any]) -> None:
         tag = "[NEW] " if job["is_new"] else "      "
         print(f"  {index:>2}. {tag}{job['title']}  —  {job['company']}")
         print(f"          {job['location']}")
-        print(f"          {job['url']}")
+        print(f"          {job['url']}{_duplicate_note(job)}")
+        if job.get("description"):
+            # `--detail` without `--json`: show the opening of the body, one
+            # line, so the flag does something in text mode too.
+            body = " ".join(str(job["description"]).split())
+            print(f"          {body[:200]}{'…' if len(body) > 200 else ''}")
 
     print()
     print(
         f"Summary: {summary['total']} total · {summary['new']} new · "
         f"{summary['saved']} saved to DB"
         + (f" · showing {summary['shown']}" if summary["shown"] != summary["total"] else "")
+        + _hidden_note(int(summary.get("hidden_duplicates") or 0))
     )
     for board, message in (summary.get("errors") or {}).items():
         print(f"  ! {board}: {message}", file=sys.stderr)

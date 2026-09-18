@@ -124,6 +124,92 @@ def test_list_reports_an_empty_store(
     assert "No stored listings" in out
 
 
+def test_list_json_reports_the_page_after_collapsing(
+    data_home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+):
+    """Same vacancy twice in the store: one row out, and the envelope says so."""
+    monkeypatch.setattr(
+        "sys.stdin",
+        FakeStdin(
+            json.dumps(
+                [
+                    {"title": "UI Designer", "company": "TopEyes", "url": "https://i.test/1"},
+                    {"title": "ui   designer", "company": " TopEyes ", "url": "https://i.test/2"},
+                ]
+            )
+        ),
+    )
+    assert run(capsys, "ingest", "--json")[0] == EXIT_OK
+
+    code, out, _ = run(capsys, "list", "--json")
+    assert code == EXIT_OK
+    payload = json.loads(out)
+    assert payload["total"] == 2, "stored rows matching the filter are still 2"
+    assert payload["shown"] == payload["unique"] == 1
+    assert payload["hidden_duplicates"] == 1
+    assert payload["jobs"][0]["duplicates"] == 1
+    # One ingest writes one `first_seen_at` for the whole batch, so the store's
+    # `ORDER BY first_seen_at DESC, title ASC` decides the representative here:
+    # "UI Designer" sorts before "ui   designer".
+    assert payload["jobs"][0]["url"] == "https://i.test/1"
+    assert payload["jobs"][0]["duplicate_urls"] == ["https://i.test/2"]
+    assert "description" not in payload["jobs"][0]
+
+
+def test_list_json_detail_carries_the_stored_description(
+    data_home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+):
+    """``list --json --detail`` is the store round-trip the agent reads."""
+    body = "Figma でプロダクトの UI を設計します。"
+    monkeypatch.setattr(
+        "sys.stdin",
+        FakeStdin(json.dumps([{"title": "UI Designer", "url": "https://i.test/1", "description": body}])),
+    )
+    assert run(capsys, "ingest", "--json")[0] == EXIT_OK
+
+    assert "description" not in json.loads(run(capsys, "list", "--json")[1])["jobs"][0]
+
+    code, out, _ = run(capsys, "list", "--json", "--detail")
+    assert code == EXIT_OK
+    assert json.loads(out)["jobs"][0]["description"] == body
+
+
+def test_list_no_dedupe_returns_every_stored_row(
+    data_home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        "sys.stdin",
+        FakeStdin(
+            json.dumps(
+                [
+                    {"title": "UI Designer", "company": "TopEyes", "url": "https://i.test/1"},
+                    {"title": "UI Designer", "company": "TopEyes", "url": "https://i.test/2"},
+                ]
+            )
+        ),
+    )
+    assert run(capsys, "ingest", "--json")[0] == EXIT_OK
+
+    code, out, _ = run(capsys, "list", "--json", "--no-dedupe")
+    assert code == EXIT_OK
+    payload = json.loads(out)
+    assert payload["shown"] == 2
+    assert payload["hidden_duplicates"] == 0
+    assert all("duplicates" not in job for job in payload["jobs"])
+
+
+def test_both_subcommands_accept_the_envelope_flags():
+    """The engine is drivable directly, and the defaults stay what they were."""
+    parser = build_parser()
+    for command in ("search", "list"):
+        bare = parser.parse_args([command])
+        assert bare.detail is False, f"{command} should not ask for descriptions"
+        assert bare.no_dedupe is False, f"{command} should collapse by default"
+        asked = parser.parse_args([command, "--detail", "--no-dedupe"])
+        assert asked.detail is True
+        assert asked.no_dedupe is True
+
+
 def test_unknown_source_is_a_usage_error(
     data_home: Path, capsys: pytest.CaptureFixture[str]
 ):
@@ -332,6 +418,18 @@ def test_search_dispatch_runs_the_configured_boards(
     code, _, _ = run(capsys, "search", "--json")
     assert code == EXIT_OK
     assert seen[-1].sources.as_list() == ["green", "japandev"]
+
+
+def test_search_dispatch_forwards_the_envelope_flags(
+    data_home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+):
+    """``--detail``/``--no-dedupe`` have to reach the request, not just parse."""
+    seen = capture_search(monkeypatch)
+    assert run(capsys, "search", "--json")[0] == EXIT_OK
+    assert (seen[-1].detail, seen[-1].dedupe) == (False, True), "the defaults hold"
+
+    assert run(capsys, "search", "--json", "--detail", "--no-dedupe")[0] == EXIT_OK
+    assert (seen[-1].detail, seen[-1].dedupe) == (True, False)
 
 
 def test_monitor_dispatch_watches_the_configured_boards(
