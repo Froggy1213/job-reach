@@ -171,9 +171,16 @@ def _finish(
     filter_stats: dict[str, Any] = {}
 
     if request.validation != "off" and jobs:
+        # The description is not decoration here. A board may synthesise the
+        # title from its own occupation code (Mynavi titles every card
+        # "<company> (WEBデザイナー)"), so for those boards the body text is the
+        # only evidence a filter has; leaving it out made validation a no-op
+        # that answered "keep" for the whole board. The flag travels with it so
+        # the filter knows when the title must not be counted as evidence.
         payload = [
             {"title": job.title, "company": job.company, "location": job.location,
-             "url": job.url}
+             "url": job.url, "description": job.description,
+             "title_is_synthetic": job.title_is_synthetic}
             for job in jobs
         ]
         outcome = filter_jobs(

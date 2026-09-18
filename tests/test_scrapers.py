@@ -372,6 +372,22 @@ def test_mynavi_parses_and_deduplicates_cards():
     assert jobs[0].title == "Acme (WEBデザイナー)"
 
 
+def test_mynavi_declares_its_title_synthetic():
+    """The title is built from the occupation code, so it must not be evidence.
+
+    Every card under 415 is titled "…（WEBデザイナー）" whatever the company
+    actually recruits for; a relevance filter reading that title would find its
+    own search term in it and keep the entire board.
+    """
+    jobs = Mynavi2027Scraper()._parse_cards(
+        [mynavi_card(cardText="Webデザイン、バナー制作、コーディング")],
+        "WEBデザイナー",
+        set(),
+    )
+    assert jobs[0].title_is_synthetic is True
+    assert jobs[0].description == "Webデザイン、バナー制作、コーディング"
+
+
 def test_mynavi_filters_non_design_cards():
     jobs = Mynavi2027Scraper()._parse_cards(
         [mynavi_card(matchedText="Acme | 営業", url="https://job.mynavi.jp/corp9")],

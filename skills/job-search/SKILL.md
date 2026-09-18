@@ -66,7 +66,7 @@ server is involved. `job_status` reports exactly what this machine has.
 | Daijob | `daijob` | ✅ server-side | ✅ slug (東京/大阪) | ~2 s | Bilingual and foreign-capital employers. Server-rendered HTML. |
 | Japan Dev | `japandev` | ⚠️ titles only | ❌ | ~1 s | English-speaking tech jobs. **The site ignores `?query=`** — the plugin filters titles itself, so Japanese keywords match nothing here. |
 | Indeed Japan | `indeed` | ✅ server-side | ✅ slug or 地名 | ~30 s | The widest market. Stealth browser; the only board that can be bot-blocked. |
-| Mynavi 2027 | `mynavi2027` | ⚠️ best-effort | ❌ ignored | ~1 min | New-graduate, design-only, nationwide, by occupation code. |
+| Mynavi 2027 | `mynavi2027` | ⚠️ best-effort | ❌ ignored | ~1 min | New-graduate, nationwide, by occupation code. A code is a company-level tag, so most cards are not design roles — pair it with `validation="local"`. |
 | LinkedIn | `linkedin` | ✅ server-side | ✅ | ~20 s | Needs Chrome running with the OpenCLI extension. |
 
 **Rule of thumb:** for any general or non-design search
@@ -204,7 +204,7 @@ correct, not a bug. Use `new_only: true` to surface only fresh listings, or
 | Clean up noisy results | `job_search(keyword="designer", validation="local", profile="designer")` |
 | What did we collect this week? | `job_list(new_since="2026-09-10T00:00:00+00:00")` |
 | Save the last search to Obsidian | `job_note(result=<the envelope>)` |
-| New-grad design, Mynavi only | `job_search(sources=["mynavi2027"])` |
+| New-grad design, Mynavi only | `job_search(sources=["mynavi2027"], validation="local", profile="designer")` |
 
 ## One note from several searches
 
@@ -241,8 +241,9 @@ user's exact ask, similar roles, per-board caveats): the tables alone are raw da
    against live sites. Do not re-issue the search.
 2. **Reading `new: 0` as failure.** It means nothing changed since the last
    run. Check `summary.total` for how many currently match.
-3. **Routing a general keyword to Mynavi.** It is occupation-code,
-   new-graduate, design-only, and ignores location. Use Wantedly or Indeed.
+3. **Routing a general keyword to Mynavi.** It is occupation-code driven,
+   new-graduate, and ignores location; "design-only" is the board's label
+   rather than a fact (see 15). Use Wantedly or Indeed.
 4. **Assuming Wantedly is broken when the browser stack is.** It is HTTP-only;
    a Wantedly failure is a network/API problem, not a missing browser.
 5. **Fabricating listings.** A blocked or empty board means zero results.
@@ -271,6 +272,12 @@ user's exact ask, similar roles, per-board caveats): the tables alone are raw da
     titles before believing a board matched, and drop the board from the note if it
     did not. Likewise Green's keyword search is fuzzy: it returns sales/HR roles for
     `DTP` and `グラフィックデザイナー`, so re-filter titles before reporting.
+15. **Trusting a Mynavi occupation code.** The code is a *company-level* tag: the
+    board files a company under WEBデザイナー if it recruits designers anywhere, and
+    the card then lists every course that company runs. On live 415/580/620 results
+    only about one card in ten mentioned デザイン at all. The title cannot help
+    either — the scraper builds it from the code, so it always contains `デザイナー`.
+    Pass `validation="local"` and Mynavi is judged on its card text instead.
 
 ## Verification checklist
 

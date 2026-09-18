@@ -169,6 +169,13 @@ class Mynavi2027Scraper(BaseScraper):
                         location=str(item.get("location") or "Japan"),
                         source_platform=self.platform,
                         description=str(item["cardText"]).strip() if item.get("cardText") else None,
+                        # The title above is this scraper's own construction from
+                        # the occupation code, so it says nothing about the job —
+                        # every card under 415 carries デザイナー whatever the
+                        # company does. Saying so is what stops a relevance
+                        # filter from reading its own search term back as
+                        # evidence and keeping the whole board.
+                        title_is_synthetic=True,
                     )
                 )
             except Exception:  # noqa: BLE001 — malformed card, keep going

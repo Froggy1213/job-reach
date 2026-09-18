@@ -67,6 +67,65 @@ def test_filter_jobs_handles_an_empty_batch():
     assert result.stats["total"] == 0
 
 
+# --- what the local filter is allowed to read ------------------------------
+#
+# Mynavi files listings under an occupation code and titles every card after it,
+# so the title of every card under 415 reads "…（WEBデザイナー）". Judging that
+# title is judging the board's search term: デザイナー is in it by construction,
+# the profile matches it, and the filter says "keep" for the entire board. The
+# body text is the only evidence, which is why the pipeline forwards it.
+
+
+def test_local_mode_reads_the_description_too():
+    result = filter_jobs(
+        [{"title": "UI Designer", "description": "ゲーム企画・シナリオ作成が中心の募集です。"}],
+        profile="designer",
+        mode="local",
+    )
+    assert result.rejected and not result.kept
+
+
+def test_a_real_title_is_still_evidence():
+    result = filter_jobs(
+        [{"title": "UI Designer", "description": "私たちと一緒に働きませんか。"}],
+        profile="designer",
+        mode="local",
+    )
+    assert [job["title"] for job in result.kept] == ["UI Designer"]
+
+
+def test_a_synthetic_title_does_not_vouch_for_a_listing():
+    """The Mynavi trap: the board's own search term must not keep the card."""
+    result = filter_jobs(
+        [
+            {
+                "title": "Acme (WEBデザイナー)",  # synthesised by the scraper
+                "description": "法人向け商材の営業。既存顧客のフォローが中心です。",
+                "title_is_synthetic": True,
+            },
+            {
+                "title": "Globex (WEBデザイナー)",
+                "description": "Webサイトのデザイン、バナー制作、コーディングをお願いします。",
+                "title_is_synthetic": True,
+            },
+        ],
+        profile="designer",
+        mode="local",
+    )
+    assert [job["title"] for job in result.kept] == ["Globex (WEBデザイナー)"]
+    assert "no designer match" in result.rejected[0]["filter_reason"]
+
+
+def test_a_synthetic_title_is_still_used_when_there_is_no_body():
+    """A card whose body failed to parse must not look like an empty board."""
+    result = filter_jobs(
+        [{"title": "Acme (WEBデザイナー)", "description": None, "title_is_synthetic": True}],
+        profile="designer",
+        mode="local",
+    )
+    assert len(result.kept) == 1
+
+
 def test_unknown_mode_is_rejected():
     with pytest.raises(FilterError, match="unknown validation mode"):
         filter_jobs([{"title": "x"}], mode="vibes")
@@ -88,6 +147,30 @@ def test_llm_mode_without_a_key_fails_loudly(monkeypatch: pytest.MonkeyPatch):
     _clear_llm_env(monkeypatch)
     with pytest.raises(FilterError, match="API key"):
         filter_jobs([{"title": "UI Designer"}], mode="llm")
+
+
+def test_the_llm_prompt_keeps_both_ends_of_a_long_description(monkeypatch: pytest.MonkeyPatch):
+    """The role is at the *end* of a Japanese card, so a head-only sample misses it.
+
+    Mynavi opens a card with remaining headcount and the company's industry tags
+    and only reaches 募集内容・特徴 hundreds of characters later; excerpting the
+    first 300 characters handed the classifier the noise and hid the answer.
+    """
+    _clear_llm_env(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    seen: dict[str, object] = {}
+
+    def fake_completion(**kwargs):
+        seen.update(kwargs)
+        return {"choices": [{"message": {"content": '{"classifications": []}'}}]}
+
+    monkeypatch.setattr("jobreach.filters._chat_completion", fake_completion)
+    body = "業 種 人材派遣・人材紹介、機械 本 社東京都" + "あ" * 400 + " 募集内容・特徴：UIデザイナー"
+    filter_jobs([{"title": "Acme (WEBデザイナー)", "description": body}], mode="llm")
+
+    prompt = str(seen["messages"][1]["content"])  # type: ignore[index]
+    assert "募集内容・特徴：UIデザイナー" in prompt
+    assert "業 種" in prompt
 
 
 def test_llm_batches_fall_back_to_local_on_failure(monkeypatch: pytest.MonkeyPatch):

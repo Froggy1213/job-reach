@@ -127,6 +127,14 @@ class JobPosting:
     #: first to see the listing. Not part of the persisted identity.
     is_new: bool = False
 
+    #: ``True`` when the *scraper invented* the title rather than reading it off
+    #: the listing, so it is evidence about the board's filing cabinet and not
+    #: about the job. Mynavi is the case in point: it titles every card from the
+    #: occupation code it searched ("<company> (WEBデザイナー)"), which makes the
+    #: title useless — actively misleading — as filter input. The relevance
+    #: filter then judges such a listing on its description alone.
+    title_is_synthetic: bool = False
+
     def __post_init__(self) -> None:
         object.__setattr__(self, "title", _clean(self.title, MAX_TITLE, "title"))
         object.__setattr__(self, "company", _clean(self.company, MAX_COMPANY, "company"))

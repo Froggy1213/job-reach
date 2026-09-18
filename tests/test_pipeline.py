@@ -12,7 +12,9 @@ from typing import Any
 
 import pytest
 
+from jobreach import pipeline
 from jobreach.config import Sources
+from jobreach.domain import JobPosting
 from jobreach.pipeline import SearchRequest, ingest, query, stats
 from jobreach.store import SQLiteJobRepository
 
@@ -114,6 +116,63 @@ def test_validation_filters_by_profile(repo: SQLiteJobRepository):
     )
     assert result["summary"]["total"] == 1
     assert result["summary"]["filter"]["kept"] == 1
+    assert result["summary"]["filter"]["rejected"] == 1
+
+
+def test_validation_reaches_the_listing_body(repo: SQLiteJobRepository):
+    """The body text has to survive the trip to the filter.
+
+    It did not: the payload carried only title/company/location/url, so a board
+    whose titles are synthesised from an occupation code (Mynavi) fed the filter
+    nothing but its own search term and every listing came back "keep".
+    """
+    result = ingest(
+        [record("https://i.test/1", title="UI Designer", description="ゲーム企画の募集です")],
+        request(validation="local", validation_profile="designer"),
+        repo,
+    )
+    assert result["summary"]["total"] == 0
+    assert result["summary"]["filter"]["rejected"] == 1
+
+
+def test_a_synthetic_title_does_not_survive_the_filter(repo: SQLiteJobRepository, monkeypatch):
+    """The whole Mynavi chain: the scraper's flag has to reach the filter.
+
+    A card filed under 415 is titled "<company> (WEBデザイナー)" by the scraper
+    itself, so the title names the very word the designer profile looks for. If
+    that title is counted as evidence the listing keeps itself, and every card
+    the board miscategorised comes back as a design job.
+    """
+    captured: dict[str, Any] = {}
+    real_filter_jobs = pipeline.filter_jobs
+
+    def spy(jobs, **kwargs):
+        captured["jobs"] = jobs
+        return real_filter_jobs(jobs, **kwargs)
+
+    monkeypatch.setattr("jobreach.pipeline.filter_jobs", spy)
+    job = JobPosting(
+        title="Acme (WEBデザイナー)",
+        company="Acme",
+        url="https://job.mynavi.jp/corp1",
+        location="Japan",
+        source_platform="mynavi2027",
+        description="法人向け商材の営業。既存顧客のフォローが中心です。",
+        title_is_synthetic=True,
+    )
+    result = pipeline._finish(
+        [job],
+        {},
+        request(validation="local", validation_profile="designer"),
+        repo,
+        run_id=repo.start_run("search", None, None, ["mynavi2027"]),
+        mode="search",
+        sources=["mynavi2027"],
+    )
+
+    assert captured["jobs"][0]["description"] == job.description
+    assert captured["jobs"][0]["title_is_synthetic"] is True
+    assert result["summary"]["total"] == 0
     assert result["summary"]["filter"]["rejected"] == 1
 
 

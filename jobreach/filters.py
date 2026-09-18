@@ -3,9 +3,14 @@
 Two strategies, same interface:
 
 ``local``
-    Regex heuristics over the title. Free, instant, deterministic. Good enough
-    to strip "Sales / Marketing / Nurse" noise out of a design search, and it
-    is what the pipeline uses by default.
+    Regex heuristics over the listing text. Free, instant, deterministic. Good
+    enough to strip "Sales / Marketing / Nurse" noise out of a design search.
+
+    The text it sees is the title *plus* the board's own body text — see
+    :func:`_match_text`. That matters more than it sounds: a board is free to
+    invent the title it gives us (Mynavi builds ``"<company> (WEBデザイナー)"``
+    from an occupation code), and a title the board made up cannot be evidence
+    about the job. Only the body text is.
 
 ``llm``
     Batches listings through any OpenAI-compatible chat-completions endpoint
@@ -224,9 +229,39 @@ class FilterResult:
 # --------------------------------------------------------------------------- #
 
 
-def local_match(title: str, profile: str) -> Decision:
-    """Classify *title* against *profile* using regex heuristics only."""
-    text = title.lower()
+def _match_text(job: Mapping[str, Any]) -> str:
+    """The text a decision about *job* may be based on: title **and** body.
+
+    Two rules, both learned the hard way:
+
+    * the body text is the only part with real content. Cataloguing listings by
+      an occupation code (Mynavi) means the title is synthesised from that code,
+      so every listing under "WEBデザイナー" is titled "…（WEBデザイナー）"
+      regardless of what the company actually does;
+    * when the scraper says the title is synthetic (``title_is_synthetic``),
+      concatenating it would be worse than useless — it names the very word the
+      profile looks for, so it alone answers "keep" for the entire board. Such a
+      listing is judged on its body, and on its title only if the body is empty
+      (a broken selector must not turn into a silent empty result).
+    """
+    description = str(job.get("description") or "").strip()
+    title = str(job.get("title") or "")
+    if not description:
+        return title
+    if job.get("title_is_synthetic"):
+        return description
+    return f"{title} {description}".strip()
+
+
+def local_match(text: str, profile: str) -> Decision:
+    """Classify *text* against *profile* using regex heuristics only.
+
+    *text* is whatever the caller can justify reasoning about — normally a
+    listing's title and body concatenated by :func:`_match_text`. It is not
+    named ``title`` because passing only a board-synthesised title is exactly
+    the mistake that makes this filter answer ``keep`` for everything.
+    """
+    text = text.lower()
 
     for pattern in UNIVERSAL_STOP:
         if re.search(pattern, text):
@@ -350,6 +385,23 @@ def resolve_llm_settings(
     )
 
 
+def _excerpt(text: str, limit: int = 300) -> str:
+    """A short sample of *text* that keeps **both** ends.
+
+    A head-only sample reads the least informative part of a Japanese listing:
+    Mynavi's card body opens with remaining headcount, the last-updated date and
+    the company's industry tags, and only reaches 募集内容・特徴 (the courses
+    actually being recruited for) several hundred characters later. Handing the
+    classifier the first 300 characters of a 400-character card therefore hides
+    the one line that answers the question.
+    """
+    text = " ".join(str(text).split())
+    if len(text) <= limit:
+        return text
+    head = limit // 2
+    return f"{text[:head]} … {text[-(limit - head):]}"
+
+
 def llm_filter(
     jobs: list[dict[str, Any]],
     profile: str,
@@ -390,7 +442,7 @@ def llm_filter(
             if job.get("location"):
                 parts.append(f" | Location: {job['location']}")
             if job.get("description"):
-                parts.append(f" | Description: {str(job['description'])[:300]}")
+                parts.append(f" | Description: {_excerpt(job['description'])}")
             lines.append("".join(parts))
 
         try:
@@ -427,7 +479,7 @@ def llm_filter(
             for offset, job in enumerate(batch):
                 item = by_index.get(start + offset)
                 if item is None:
-                    decisions.append(local_match(job.get("title", ""), profile))
+                    decisions.append(local_match(_match_text(job), profile))
                     continue
                 keep = bool(item.get("keep", False))
                 decisions.append(
@@ -441,7 +493,7 @@ def llm_filter(
             logger.warning("LLM batch failed, falling back to local", extra={"error": str(exc)})
             stats["fallbacks"] += 1
             for job in batch:
-                fallback = local_match(job.get("title", ""), profile)
+                fallback = local_match(_match_text(job), profile)
                 decisions.append(
                     Decision(fallback.keep, f"LLM failover: {fallback.reason}", fallback.score)
                 )
@@ -507,6 +559,10 @@ def filter_jobs(
 ) -> FilterResult:
     """Split *jobs* into ``kept`` and ``rejected`` under *profile*.
 
+    In ``local`` mode each listing is judged on its title **and** its
+    ``description`` (see :func:`_match_text`), so a caller that has body text
+    must pass it through — a title alone can be synthetic.
+
     Each returned record is the input dict plus ``filter_reason`` and
     ``filter_score``, so the agent can explain *why* something was dropped.
     """
@@ -518,7 +574,7 @@ def filter_jobs(
             jobs, profile, api_key=api_key, base_url=base_url, model=model
         )
     elif mode == "local":
-        decisions = [local_match(job.get("title", ""), profile) for job in jobs]
+        decisions = [local_match(_match_text(job), profile) for job in jobs]
         stats = {"mode": "local"}
     else:
         raise FilterError(f"unknown validation mode {mode!r}; use 'local' or 'llm'")
