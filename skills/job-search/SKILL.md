@@ -74,8 +74,9 @@ before assuming `off`:
 - **`validation`** (`off` | `local` | `llm`) with **`profile`** (`designer`,
   `frontend`, `engineering`, `product`, `any`) — the relevance filter. `off` is
   the built-in default and returns every raw row; `local` is free and judges
-  title **and body**. Measured on one full seven-board sweep: `off` → 140
-  listings ≈ 91 KB of JSON, `local` + `designer` → 70 listings ≈ 9.5 KB; the
+  title **and body**. Measured back to back on the four browser-free boards:
+  `off` → 57 cards ≈ 34.6 KB, `local` + `designer` → 15 cards ≈ 10.0 KB (on a
+  seven-board sweep the same contrast ran ~90 KB against ~9.5 KB); the
   difference was Daijob recruiter rows (40 scraped, 0 kept) and unrelated
   LinkedIn postings. A configured `default_validation`/`default_profile` makes
   that the default for a bare call; an explicit argument still wins.

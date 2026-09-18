@@ -126,9 +126,12 @@ reasoning and the before/after evidence are in
 be the noisy one.** A bare `job_search` over all seven boards returned 140
 listings — around 90 KB of JSON, roughly a quarter of a context window — of
 which about nine tenths was noise (recruiter rows from Daijob, postings
-unrelated to design from LinkedIn). The same call with `validation="local"` and
-`profile="designer"` returned 9.5 KB of listings the user wanted. The filter was
-always there; only an explicit argument could switch it on.
+unrelated to design from LinkedIn). Re-run with `validation="local"` and
+`profile="designer"` the sweep came back an order of magnitude smaller, 9.5 KB
+of listings the user wanted. The filter was always there; only an explicit
+argument could switch it on. (Those two figures are separate sweeps; measured
+back to back on the four browser-free boards, `off` returned 57 cards / 34.6 KB
+and `local` 15 cards / 10.0 KB.)
 
 - **`default_validation` and `default_profile` are two new settings.** They
   supply the value the engine's `--validate` and `--profile` flags fall back to,
@@ -146,7 +149,7 @@ always there; only an explicit argument could switch it on.
   `default_validation` or `default_profile` is logged on stderr and the built-in
   default is used, so a typo in `config.yaml` cannot stop a cron monitor — or a
   search — from running. A blank value still means "plugin default". Every new
-  behaviour has its own test; the suite is 503 tests, green.
+  behaviour has its own test; the suite is 528 tests, green.
 - **Content duplicates collapse before a caller ever counts them.** An employer
   posting one vacancy as ~30 near-identical cards (routine on Wantedly) read as
   30 vacancies. A run now folds rows that share a company, title and board into
