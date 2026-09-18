@@ -11,6 +11,7 @@ Validation is explicit and cheap, which is all a scraper pipeline needs.
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -83,6 +84,25 @@ PLATFORM_ALIASES: dict[str, SourcePlatform] = {
     "japan_dev": SourcePlatform.JAPAN_DEV,
     "japan-dev": SourcePlatform.JAPAN_DEV,
 }
+
+
+def normalize_text(value: str) -> str:
+    """Reduce a name to its comparison form: width, case, whitespace.
+
+    Employers on these boards write the same company name differently from one
+    card to the next — a full-width letter or space where the next card has a
+    plain one, a doubled or trailing space, an ALL-CAPS legal name — so a raw
+    string comparison misses the duplicate a human sees at a glance.
+
+    ``NFKC`` folds the width variants onto one form (``ＴｏｐＥｙｅｓ`` →
+    ``TopEyes``, half-width katakana onto full-width), ``str.split()`` splits on
+    any Unicode whitespace and the single-space join puts one ASCII space back —
+    which collapses the ideographic space (U+3000) too — and ``casefold``
+    answers case. Nothing here is applied to the *stored* text; it exists only
+    to compare two cards.
+    """
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    return " ".join(text.split()).casefold()
 
 
 def resolve_platform(name: str | SourcePlatform) -> SourcePlatform:
@@ -161,9 +181,26 @@ class JobPosting:
         """Human-facing board name ("Wantedly", "Mynavi 2027", …)."""
         return PLATFORM_LABELS.get(self.source_platform, self.platform)
 
-    def to_dict(self) -> dict[str, Any]:
-        """Serialise to a JSON-safe dict — the stable wire format of the plugin."""
-        return {
+    @property
+    def content_key(self) -> tuple[str, str, str]:
+        """Identity of the *vacancy*, not of the card: (company, title, board).
+
+        The store's key is the URL, which is the right answer to "have I seen
+        this listing?" and the wrong one to "is this the same job again?": one
+        employer posts one vacancy as dozens of cards, each with its own URL.
+        This is the content-level key the pipeline collapses on, so it must be
+        about what the card *says*, normalised (see :func:`normalize_text`).
+        """
+        return (normalize_text(self.company), normalize_text(self.title), self.platform)
+
+    def to_dict(self, *, detail: bool = False) -> dict[str, Any]:
+        """Serialise to a JSON-safe dict — the stable wire format of the plugin.
+
+        *detail* appends the stored body text. It is opt-in and off by default
+        because a description is capped at :data:`MAX_DESCRIPTION` characters
+        *per listing*, so the caller pays for it in context.
+        """
+        payload = {
             "title": self.title,
             "company": self.company,
             "url": self.url,
@@ -177,6 +214,9 @@ class JobPosting:
             #: common (LinkedIn and Mynavi do not expose it at all).
             "posted_at": self.posted_at.isoformat() if self.posted_at else None,
         }
+        if detail:
+            payload["description"] = self.description
+        return payload
 
     @classmethod
     def from_dict(cls, record: dict[str, Any]) -> JobPosting:

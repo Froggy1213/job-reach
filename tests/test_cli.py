@@ -124,6 +124,92 @@ def test_list_reports_an_empty_store(
     assert "No stored listings" in out
 
 
+def test_list_json_reports_the_page_after_collapsing(
+    data_home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+):
+    """Same vacancy twice in the store: one row out, and the envelope says so."""
+    monkeypatch.setattr(
+        "sys.stdin",
+        FakeStdin(
+            json.dumps(
+                [
+                    {"title": "UI Designer", "company": "TopEyes", "url": "https://i.test/1"},
+                    {"title": "ui   designer", "company": " TopEyes ", "url": "https://i.test/2"},
+                ]
+            )
+        ),
+    )
+    assert run(capsys, "ingest", "--json")[0] == EXIT_OK
+
+    code, out, _ = run(capsys, "list", "--json")
+    assert code == EXIT_OK
+    payload = json.loads(out)
+    assert payload["total"] == 2, "stored rows matching the filter are still 2"
+    assert payload["shown"] == payload["unique"] == 1
+    assert payload["hidden_duplicates"] == 1
+    assert payload["jobs"][0]["duplicates"] == 1
+    # One ingest writes one `first_seen_at` for the whole batch, so the store's
+    # `ORDER BY first_seen_at DESC, title ASC` decides the representative here:
+    # "UI Designer" sorts before "ui   designer".
+    assert payload["jobs"][0]["url"] == "https://i.test/1"
+    assert payload["jobs"][0]["duplicate_urls"] == ["https://i.test/2"]
+    assert "description" not in payload["jobs"][0]
+
+
+def test_list_json_detail_carries_the_stored_description(
+    data_home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+):
+    """``list --json --detail`` is the store round-trip the agent reads."""
+    body = "Figma でプロダクトの UI を設計します。"
+    monkeypatch.setattr(
+        "sys.stdin",
+        FakeStdin(json.dumps([{"title": "UI Designer", "url": "https://i.test/1", "description": body}])),
+    )
+    assert run(capsys, "ingest", "--json")[0] == EXIT_OK
+
+    assert "description" not in json.loads(run(capsys, "list", "--json")[1])["jobs"][0]
+
+    code, out, _ = run(capsys, "list", "--json", "--detail")
+    assert code == EXIT_OK
+    assert json.loads(out)["jobs"][0]["description"] == body
+
+
+def test_list_no_dedupe_returns_every_stored_row(
+    data_home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        "sys.stdin",
+        FakeStdin(
+            json.dumps(
+                [
+                    {"title": "UI Designer", "company": "TopEyes", "url": "https://i.test/1"},
+                    {"title": "UI Designer", "company": "TopEyes", "url": "https://i.test/2"},
+                ]
+            )
+        ),
+    )
+    assert run(capsys, "ingest", "--json")[0] == EXIT_OK
+
+    code, out, _ = run(capsys, "list", "--json", "--no-dedupe")
+    assert code == EXIT_OK
+    payload = json.loads(out)
+    assert payload["shown"] == 2
+    assert payload["hidden_duplicates"] == 0
+    assert all("duplicates" not in job for job in payload["jobs"])
+
+
+def test_both_subcommands_accept_the_envelope_flags():
+    """The engine is drivable directly, and the defaults stay what they were."""
+    parser = build_parser()
+    for command in ("search", "list"):
+        bare = parser.parse_args([command])
+        assert bare.detail is False, f"{command} should not ask for descriptions"
+        assert bare.no_dedupe is False, f"{command} should collapse by default"
+        asked = parser.parse_args([command, "--detail", "--no-dedupe"])
+        assert asked.detail is True
+        assert asked.no_dedupe is True
+
+
 def test_unknown_source_is_a_usage_error(
     data_home: Path, capsys: pytest.CaptureFixture[str]
 ):
@@ -334,6 +420,18 @@ def test_search_dispatch_runs_the_configured_boards(
     assert seen[-1].sources.as_list() == ["green", "japandev"]
 
 
+def test_search_dispatch_forwards_the_envelope_flags(
+    data_home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+):
+    """``--detail``/``--no-dedupe`` have to reach the request, not just parse."""
+    seen = capture_search(monkeypatch)
+    assert run(capsys, "search", "--json")[0] == EXIT_OK
+    assert (seen[-1].detail, seen[-1].dedupe) == (False, True), "the defaults hold"
+
+    assert run(capsys, "search", "--json", "--detail", "--no-dedupe")[0] == EXIT_OK
+    assert (seen[-1].detail, seen[-1].dedupe) == (True, False)
+
+
 def test_monitor_dispatch_watches_the_configured_boards(
     data_home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ):
@@ -432,3 +530,78 @@ def test_run_search_reads_the_same_setting(monkeypatch: pytest.MonkeyPatch):
     setting(monkeypatch, "default_sources", "green")
     run_search()
     assert seen[-1].sources.as_list() == ["green"]
+
+
+# --------------------------------------------------------------------------- #
+# Settings-aware relevance defaults
+# --------------------------------------------------------------------------- #
+
+
+def test_the_relevance_defaults_are_the_built_in_ones(monkeypatch: pytest.MonkeyPatch):
+    """Nothing configured → a bare search returns exactly what it did before."""
+    clear_settings(monkeypatch)
+    args = build_parser().parse_args(["search"])
+    assert args.validate == "off"
+    assert args.profile == "designer"
+
+
+def test_the_configured_relevance_defaults_reach_both_subcommands(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """One setting feeds ``search`` and ``monitor`` — they are not allowed to drift."""
+    setting(monkeypatch, "default_validation", "local")
+    setting(monkeypatch, "default_profile", "frontend")
+    parser = build_parser()
+    for argv in (["search"], ["monitor"]):
+        args = parser.parse_args(argv)
+        assert args.validate == "local"
+        assert args.profile == "frontend"
+
+
+def test_an_explicit_relevance_flag_beats_the_setting(monkeypatch: pytest.MonkeyPatch):
+    setting(monkeypatch, "default_validation", "llm")
+    setting(monkeypatch, "default_profile", "product")
+    parser = build_parser()
+    for argv, expected in (
+        (["search", "--validate", "off"], ("off", "product")),
+        (["search", "--profile", "any"], ("llm", "any")),
+        (["search", "--validate", "local", "--profile", "frontend"], ("local", "frontend")),
+        (["monitor", "--validate", "llm"], ("llm", "product")),
+    ):
+        args = parser.parse_args(argv)
+        assert (args.validate, args.profile) == expected
+
+
+def test_monitor_keeps_its_own_cheap_default(monkeypatch: pytest.MonkeyPatch):
+    """A scheduled digest is filtered even though a bare search is not.
+
+    ``monitor`` hard-coded ``--validate local`` before the setting existed; an
+    unconfigured install keeps that, and a configured value wins.
+    """
+    clear_settings(monkeypatch)
+    assert build_parser().parse_args(["monitor"]).validate == "local"
+    setting(monkeypatch, "default_validation", "off")
+    assert build_parser().parse_args(["monitor"]).validate == "off"
+
+
+def test_a_junk_relevance_setting_never_reaches_the_parser(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A typo must not surface as argparse's ``invalid choice`` usage dump."""
+    setting(monkeypatch, "default_validation", "perhaps")
+    setting(monkeypatch, "default_profile", "design")
+    args = build_parser().parse_args(["search"])
+    assert (args.validate, args.profile) == ("off", "designer")
+
+
+def test_search_dispatch_uses_the_configured_relevance_defaults(
+    data_home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+):
+    """The setting has to arrive in the request, not just in the parser."""
+    setting(monkeypatch, "default_validation", "local")
+    setting(monkeypatch, "default_profile", "engineering")
+    seen = capture_search(monkeypatch)
+    code, _, _ = run(capsys, "search", "--json")
+    assert code == EXIT_OK
+    assert seen[-1].validation == "local"
+    assert seen[-1].validation_profile == "engineering"

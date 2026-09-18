@@ -7,6 +7,7 @@ is what needs testing, and it is identical for scraped and ingested listings.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -88,8 +89,12 @@ def test_new_only_hides_known_listings(repo: SQLiteJobRepository):
 
 
 def test_limit_caps_shown_but_not_total(repo: SQLiteJobRepository):
+    # Distinct titles on purpose: identical cards are one listing now (see the
+    # content-dedupe section below), which is not what this test is about.
     result = ingest(
-        [record(f"https://i.test/{i}") for i in range(5)], request(limit=2), repo
+        [record(f"https://i.test/{i}", title=f"Role {i}") for i in range(5)],
+        request(limit=2),
+        repo,
     )
     assert result["summary"]["total"] == 5
     assert result["summary"]["shown"] == 2
@@ -262,3 +267,192 @@ def test_search_isolates_a_failing_board(monkeypatch: pytest.MonkeyPatch):
     assert result["summary"]["total"] == 1
     assert [job["title"] for job in result["jobs"]] == ["UI Designer"]
     assert "bot challenge" in result["summary"]["errors"]["indeed"]
+
+
+# --------------------------------------------------------------------------- #
+# Envelope hygiene: the opt-in description, and the content collapse
+# --------------------------------------------------------------------------- #
+
+#: Two dates far enough apart that "the newest card wins" is not a race.
+OLDER = datetime(2026, 1, 1, tzinfo=UTC)
+NEWER = datetime(2026, 6, 1, tzinfo=UTC)
+
+
+def posting(url: str, **overrides: Any) -> JobPosting:
+    """A JobPosting for the collapse tests — same company/title unless overridden."""
+    payload: dict[str, Any] = {
+        "title": "UI Designer",
+        "company": "TopEyes",
+        "url": url,
+        "location": "Tokyo",
+        "source_platform": "indeed",
+    }
+    payload.update(overrides)
+    return JobPosting(**payload)
+
+
+def finish(
+    jobs: list[JobPosting], repo: SQLiteJobRepository, **overrides: Any
+) -> dict[str, Any]:
+    """Drive ``_finish`` directly — the scrape path without a browser.
+
+    Timestamps matter to the collapse, and ``ingest`` cannot set ``posted_at``,
+    so these tests hand the pipeline real postings instead.
+    """
+    return pipeline._finish(
+        jobs,
+        {},
+        request(**overrides),
+        repo,
+        run_id=repo.start_run("search", None, None, ["indeed"]),
+        mode="search",
+        sources=["indeed"],
+    )
+
+
+def test_the_description_is_returned_only_when_asked_for(repo: SQLiteJobRepository):
+    """``detail`` is the whole point of the flag: opt-in, and expensive."""
+    body = "Figma でプロダクトの UI を設計します。デザインシステムの運用も担当。"
+    quiet = ingest([record("https://i.test/1", description=body)], request(), repo)
+    assert "description" not in quiet["jobs"][0]
+
+    told = ingest(
+        [record("https://i.test/1", description=body)], request(detail=True), repo
+    )
+    assert told["jobs"][0]["description"] == body
+
+
+def test_two_cards_of_one_vacancy_collapse_to_one_listing(repo: SQLiteJobRepository):
+    result = finish(
+        [
+            posting("https://i.test/1", posted_at=OLDER),
+            posting("https://i.test/2", posted_at=NEWER),
+        ],
+        repo,
+    )
+
+    summary = result["summary"]
+    # `total` is still the rows the run found; the collapse is reported next to
+    # it, not by quietly shrinking it.
+    assert summary["total"] == 2
+    assert summary["unique"] == 1
+    assert summary["hidden_duplicates"] == 1
+    assert summary["shown"] == 1
+    assert summary["new"] == 1
+    assert summary["saved"] == 2, "both URLs are stored — only the report collapses"
+
+    (job,) = result["jobs"]
+    assert job["url"] == "https://i.test/2", "the newest card is the representative"
+    assert job["duplicates"] == 1
+    assert job["duplicate_urls"] == ["https://i.test/1"]
+
+
+def test_collapsing_ignores_case_width_and_spacing(repo: SQLiteJobRepository):
+    """These boards spell one employer three ways; all three are one vacancy."""
+    result = finish(
+        [
+            posting("https://i.test/1", company="TopEyes", title="UI Designer"),
+            posting("https://i.test/2", company="ＴｏｐＥｙｅｓ", title="ui  designer"),
+            posting("https://i.test/3", company=" topEyes ", title="UI Designer"),
+        ],
+        repo,
+    )
+    assert result["summary"]["total"] == 3
+    assert result["summary"]["unique"] == 1
+    assert result["summary"]["hidden_duplicates"] == 2
+    assert result["jobs"][0]["duplicates"] == 2
+    assert sorted(result["jobs"][0]["duplicate_urls"]) == ["https://i.test/1", "https://i.test/2"]
+
+
+def test_different_boards_never_collapse(repo: SQLiteJobRepository):
+    """Two boards carrying the same job are two sources, not a duplicate."""
+    result = finish(
+        [
+            posting("https://i.test/1", source_platform="indeed"),
+            posting("https://w.test/1", source_platform="wantedly"),
+        ],
+        repo,
+    )
+    assert result["summary"]["unique"] == 2
+    assert all(job["duplicates"] == 0 for job in result["jobs"])
+    assert all(job["duplicate_urls"] == [] for job in result["jobs"])
+
+
+def test_a_new_card_makes_the_kept_listing_new(repo: SQLiteJobRepository):
+    """``summary.new`` has to be reachable by counting ``is_new`` in ``jobs``."""
+    finish([posting("https://i.test/old", posted_at=NEWER)], repo)  # stored
+    result = finish(
+        [
+            posting("https://i.test/old", posted_at=NEWER),  # known
+            posting("https://i.test/new", posted_at=OLDER),  # first time seen
+        ],
+        repo,
+    )
+
+    (job,) = result["jobs"]
+    assert job["url"] == "https://i.test/old", "the newest card is still kept"
+    assert job["is_new"] is True, "a kept listing that hides a new card is new"
+    assert result["summary"]["new"] == 1
+    assert result["summary"]["new"] == sum(1 for item in result["jobs"] if item["is_new"])
+
+
+def test_dedupe_false_returns_every_row_untouched(repo: SQLiteJobRepository):
+    result = finish(
+        [
+            posting("https://i.test/1", posted_at=OLDER),
+            posting("https://i.test/2", posted_at=NEWER),
+        ],
+        repo,
+        dedupe=False,
+    )
+    assert [job["url"] for job in result["jobs"]] == ["https://i.test/1", "https://i.test/2"]
+    assert result["summary"]["total"] == 2
+    assert result["summary"]["unique"] == 2
+    assert result["summary"]["hidden_duplicates"] == 0
+    for job in result["jobs"]:
+        assert "duplicates" not in job, "a raw list must stay the shape it always was"
+        assert "duplicate_urls" not in job
+
+
+def test_the_limit_applies_to_the_collapsed_set(repo: SQLiteJobRepository):
+    """``limit`` counts vacancies the caller reads, not cards on the board."""
+    result = finish(
+        [
+            posting(f"https://i.test/{i}", title="UI Designer") for i in range(3)
+        ]
+        + [posting("https://i.test/x", title="Backend Engineer")],
+        repo,
+        limit=2,
+    )
+    assert result["summary"]["total"] == 4
+    assert result["summary"]["unique"] == 2
+    assert result["summary"]["shown"] == 2
+    assert {job["title"] for job in result["jobs"]} == {"UI Designer", "Backend Engineer"}
+
+
+def test_query_collapses_stored_rows_and_returns_the_body_on_request(
+    repo: SQLiteJobRepository,
+):
+    """The ``job_list`` path: the store pages, then the page is collapsed."""
+    finish(
+        [
+            posting("https://i.test/1", description="Figma で UI を設計します。"),
+            posting("https://i.test/2", posted_at=NEWER, description="同じ求人の別カード。"),
+        ],
+        repo,
+    )
+
+    rows = query(repo, limit=10)
+    assert len(rows) == 1
+    assert rows[0]["url"] == "https://i.test/2"
+    assert rows[0]["duplicates"] == 1
+    assert rows[0]["duplicate_urls"] == ["https://i.test/1"]
+    assert "description" not in rows[0]
+
+    detailed = query(repo, limit=10, detail=True)
+    assert detailed[0]["description"] == "同じ求人の別カード。"
+
+    raw = query(repo, limit=10, dedupe=False)
+    assert len(raw) == 2
+    assert all("duplicates" not in item for item in raw)
+

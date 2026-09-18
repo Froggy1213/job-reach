@@ -120,6 +120,52 @@ reasoning and the before/after evidence are in
 
 ---
 
+## What changed in 2.5
+
+**Relevance filtering can now be the default, because the cheap answer used to
+be the noisy one.** A bare `job_search` over all seven boards returned 140
+listings — around 90 KB of JSON, roughly a quarter of a context window — of
+which about nine tenths was noise (recruiter rows from Daijob, postings
+unrelated to design from LinkedIn). Re-run with `validation="local"` and
+`profile="designer"` the sweep came back an order of magnitude smaller, 9.5 KB
+of listings the user wanted. The filter was always there; only an explicit
+argument could switch it on. (Those two figures are separate sweeps; measured
+back to back on the four browser-free boards, `off` returned 57 cards / 34.6 KB
+and `local` 15 cards / 10.0 KB.)
+
+- **`default_validation` and `default_profile` are two new settings.** They
+  supply the value the engine's `--validate` and `--profile` flags fall back to,
+  so a bare `jobreach search` — and the `job_search` call a model makes with no
+  relevance arguments — runs the configured filter. `default_validation` is
+  `off` (every match, which is what it has always been) or `local`/`llm`;
+  `default_profile` is `designer` (the default), `frontend`, `engineering`,
+  `product` or `any`. Precedence is unchanged: **explicit argument → configured
+  setting → built-in default**.
+- **A scheduled monitor keeps a default of its own.** `monitor` filters with
+  `local` unless the user configured something else, because an unattended run
+  that pushed every raw listing into a notification would be worse than no
+  notification. A configured `default_validation` still wins.
+- **A mistyped value is a warning, not a crash.** An unknown
+  `default_validation` or `default_profile` is logged on stderr and the built-in
+  default is used, so a typo in `config.yaml` cannot stop a cron monitor — or a
+  search — from running. A blank value still means "plugin default". Every new
+  behaviour has its own test; the suite is 528 tests, green.
+- **Content duplicates collapse before a caller ever counts them.** An employer
+  posting one vacancy as ~30 near-identical cards (routine on Wantedly) read as
+  30 vacancies. A run now folds rows that share a company, title and board into
+  one representative carrying `duplicates` and `duplicate_urls`, and `summary`
+  reports `unique` and `hidden_duplicates` beside the unchanged raw `total`, so
+  a count of "how many jobs" no longer depends on the same job being posted 30
+  times. `dedupe: false` (`--no-dedupe`) returns every card when the individual
+  URLs are what matters.
+- **`detail: true` returns the body text.** The description was scraped, stored
+  and used by the relevance filter, but it never reached the caller — so the
+  only evidence for judging a listing was its title, which is useless on boards
+  that synthesise titles from an occupation code. It is opt-in because it costs
+  context: a page of listings is a page of bodies.
+
+---
+
 ## What changed in 2.3
 
 **The plugin is portable to any Hermes, including on Windows** — and the README
@@ -423,7 +469,7 @@ Everything is optional; see `.env.example`.
 
 ### Settings (`config.yaml`)
 
-Four user-visible knobs live in Hermes' `config.yaml` (`$HERMES_HOME/config.yaml`,
+Six user-visible knobs live in Hermes' `config.yaml` (`$HERMES_HOME/config.yaml`,
 by default `~/.hermes/config.yaml`) under the plugin's own namespace, which
 Hermes validates against `config_schema` in `plugin.yaml`. They are read
 through `ctx.get_config` on every tool call, so an edit takes effect on the next
@@ -435,6 +481,8 @@ call — no Hermes restart.
 | `default_sources` | `plugins.entries.job-reach.settings.default_sources` | `[]` | Boards searched when the caller passes no `sources`. Empty means the built-in board set (`wantedly`, `mynavi2027`, `linkedin`). |
 | `note_subfolder` | `plugins.entries.job-reach.settings.note_subfolder` | `"job-searches"` | Subfolder inside the Obsidian vault that `job_note` writes into. |
 | `max_results` | `plugins.entries.job-reach.settings.max_results` | unset | How many listings `job_list` returns when no `limit` is passed, and the limit `job_search` falls back to. Unset means the engine's own default — all matches for a search — so set it if you want searches capped. An explicit `limit` always wins. |
+| `default_validation` | `plugins.entries.job-reach.settings.default_validation` | `"off"` | Relevance filter used when a call passes no `validation` (a bare `jobreach search` passes no `--validate` either): `off` returns every match, `local` drops the obvious noise with free regex heuristics, `llm` classifies against the profile below and needs an API key. Set it to `local` to make a bare search return the relevant listings instead of everything. An explicit argument always wins. |
+| `default_profile` | `plugins.entries.job-reach.settings.default_profile` | `"designer"` | Filter profile used when a call passes no `profile`: `designer`, `frontend`, `engineering`, `product` or `any`. It only has an effect while relevance filtering is on (`local` or `llm`). An explicit argument always wins. |
 
 ```yaml
 plugins:
@@ -445,18 +493,23 @@ plugins:
         default_sources: [wantedly, green, daijob]
         note_subfolder: job-searches
         max_results: 50
+        default_validation: local
+        default_profile: frontend
 ```
 
 **An explicit tool argument always beats the setting.** A call that passes
-`keyword`, `sources`, `limit` or `subfolder` is obeyed verbatim; the setting
-only fills the gap when the caller omits the argument. A key left out of
-`config.yaml` means "use the default", never "override with nothing".
+`keyword`, `sources`, `limit`, `subfolder`, `validation` or `profile` is obeyed
+verbatim; the setting only fills the gap when the caller omits the argument. A
+key left out of `config.yaml` means "use the default", never "override with
+nothing" — and a value outside the allowed list is a warning on stderr plus the
+default, never a failure.
 
 ### Environment variables
 
 `JOBREACH_SETTING_*` (`JOBREACH_SETTING_DEFAULT_KEYWORD`,
 `JOBREACH_SETTING_DEFAULT_SOURCES`, `JOBREACH_SETTING_NOTE_SUBFOLDER`,
-`JOBREACH_SETTING_MAX_RESULTS`) is the **internal bridge**, not a user-facing
+`JOBREACH_SETTING_MAX_RESULTS`, `JOBREACH_SETTING_DEFAULT_VALIDATION`,
+`JOBREACH_SETTING_DEFAULT_PROFILE`) is the **internal bridge**, not a user-facing
 knob: the plugin process mirrors the settings it read into those variables so
 the engine subprocess (which cannot reach `ctx.get_config`) can see them. Set
 the `config.yaml` keys above instead. The variables listed here are genuine

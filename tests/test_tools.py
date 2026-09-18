@@ -760,3 +760,40 @@ def test_job_status_honours_recent_runs_but_keeps_the_journal(tools, engine):
     payload = call(tools.handle_job_status, {"recent_runs": 2})
     assert payload["store"]["recent_runs"] == [1, 2]
     assert payload["recent_tool_calls"] == []
+
+
+# --------------------------------------------------------------------------- #
+# The envelope flags: detail is opt-in, dedupe defaults in the engine
+# --------------------------------------------------------------------------- #
+
+
+def test_job_search_forwards_detail_and_no_dedupe(tools, engine):
+    call(tools.handle_job_search, {"keyword": "designer", "detail": True, "dedupe": False})
+    args = engine.last["args"]
+    assert "--detail" in args
+    assert "--no-dedupe" in args
+
+
+def test_job_search_sends_neither_flag_when_the_caller_said_nothing(tools, engine):
+    """The engine owns both defaults, so an omitted argument must stay omitted."""
+    call(tools.handle_job_search, {"keyword": "designer"})
+    assert "--detail" not in engine.last["args"]
+    assert "--no-dedupe" not in engine.last["args"]
+
+
+def test_job_search_only_negates_dedupe_for_an_explicit_false(tools, engine):
+    call(tools.handle_job_search, {"keyword": "designer", "dedupe": True})
+    assert "--no-dedupe" not in engine.last["args"]
+
+
+def test_job_list_forwards_detail_and_no_dedupe(tools, engine):
+    call(tools.handle_job_list, {})
+    assert "--detail" not in engine.last["args"]
+    assert "--no-dedupe" not in engine.last["args"]
+
+    call(tools.handle_job_list, {"detail": True})
+    assert "--detail" in engine.last["args"]
+
+    call(tools.handle_job_list, {"dedupe": False})
+    assert "--no-dedupe" in engine.last["args"]
+

@@ -26,7 +26,7 @@ Beyond argv translation this module owns the two things that only exist on the
 plugin side of that bridge:
 
 * **settings** — the engine can never call ``ctx.get_config`` from a subprocess,
-  so :func:`_settings` reads the four ``config_schema`` keys once per call and
+  so :func:`_settings` reads the six ``config_schema`` keys once per call and
   hands them to :func:`jobreach.runtime.run_engine`, which mirrors them into the
   child's environment;
 * **the tool-call journal** — :func:`journal_append` / :func:`journal_read` keep
@@ -65,7 +65,14 @@ logger = logging.getLogger(__name__)
 #: because this module must stay importable on its own — tooling imports it as a
 #: plain submodule, without the plugin package's ``__init__`` having run —
 #: while ``__init__.py`` re-exports it for the manifest tests.
-SETTINGS_KEYS = ("default_keyword", "default_sources", "note_subfolder", "max_results")
+SETTINGS_KEYS = (
+    "default_keyword",
+    "default_sources",
+    "note_subfolder",
+    "max_results",
+    "default_validation",
+    "default_profile",
+)
 
 #: Generous per-call ceiling: a two-board headless scrape plus retries.
 DEFAULT_TIMEOUT = 600.0
@@ -656,6 +663,10 @@ async def handle_job_search(params: dict[str, Any], *, ctx: Any = None, **kwargs
 
     ``default_keyword``, ``default_sources`` and ``max_results`` fill in only
     what the caller left out: an argument the model passed always wins.
+    ``default_validation`` / ``default_profile`` are deliberately *not* read
+    here: the argv below leaves ``--validate``/``--profile`` out entirely when
+    the model passed neither, so the engine falls back to the configured
+    default on its own — one place decides, and an explicit argument still wins.
     """
     params = _as_dict(params)
     settings = _settings(ctx)
@@ -686,6 +697,10 @@ async def handle_job_search(params: dict[str, Any], *, ctx: Any = None, **kwargs
         args.extend(["--source", source_flag])
 
     _bool_flag(args, bool(params.get("new_only")), "--new-only")
+    _bool_flag(args, bool(params.get("detail")), "--detail")
+    # Only an explicit `false` travels: saying nothing leaves the engine's own
+    # default (collapse) in charge, so this flag cannot drift from the CLI's.
+    _bool_flag(args, params.get("dedupe") is False, "--no-dedupe")
     if params.get("save") is False:
         args.append("--no-save")
     if params.get("headless") is False:
@@ -758,6 +773,9 @@ async def handle_job_list(params: dict[str, Any], *, ctx: Any = None, **kwargs: 
     for flag, value in options.items():
         args.extend([flag, str(value)])
 
+    _bool_flag(args, bool(params.get("detail")), "--detail")
+    _bool_flag(args, params.get("dedupe") is False, "--no-dedupe")
+
     payload, error = await asyncio.to_thread(
         _invoke, args, timeout=60.0, settings=settings
     )
@@ -771,6 +789,10 @@ async def handle_job_list(params: dict[str, Any], *, ctx: Any = None, **kwargs: 
             job for job in payload.get("jobs", []) if str(job.get("scraped_at") or "") >= threshold
         ]
         payload["shown"] = len(payload["jobs"])
+        # The collapse happened inside the engine and cannot see this filter,
+        # so `unique` has to come down with `shown` or the envelope counts rows
+        # it is no longer returning.
+        payload["unique"] = payload["shown"]
     return _ok({"result": payload})
 
 
