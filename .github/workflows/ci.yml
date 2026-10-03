@@ -1,0 +1,57 @@
+# CI workflow for the Job Reach Hermes Agent plugin.
+#
+# Mirrors the verification gates documented in AGENTS.md:
+# 1. Linting with ruff (pins target-version py311).
+# 2. Pytest suite (contract tests, settings bridge, portability).
+# 3. Acceptance harness (tools_acceptance.py: 22 assertions, end-to-end
+#    subprocess bridge, settings plumbing, journal tracking, without pytest
+#    or Hermes imports).
+#
+# The matrix (Python 3.11 and 3.12) matters because the plugin ships to users
+# on macOS, Linux, and Windows with requires-python = ">=3.11". Hermes itself
+# runs in Python 3.14, and the engine subprocess must run cleanly across
+# supported Python versions without third-party dependencies.
+# Browsers and the hermes CLI are deliberately omitted as neither exists in CI.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Run ruff
+        run: uvx ruff check .
+
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Run pytest suite
+        run: uv run --python ${{ matrix.python-version }} --with pytest --with pyyaml --no-project python -m pytest
+
+      - name: Run acceptance harness
+        run: uv run --python ${{ matrix.python-version }} --no-project python tools_acceptance.py .

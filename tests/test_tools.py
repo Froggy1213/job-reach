@@ -908,3 +908,52 @@ def test_job_list_filters_on_instants_and_restates_its_counts(tools, engine):
     assert [job["url"] for job in jobs] == ["https://x.test/new"]
     assert payload["result"]["shown"] == 1
     assert payload["result"]["unique"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# job_cron idempotency and setup warnings
+# --------------------------------------------------------------------------- #
+
+
+def test_job_cron_reused_envelope_is_a_success(tools, engine):
+    """When a job is reused rather than created, handle_job_cron must return success."""
+    engine.payload = {
+        "created": False,
+        "reused": True,
+        "id": "job-reused-1",
+        "command": "hermes cron edit job-reused-1",
+        "message": "already installed and up to date; nothing created",
+    }
+    payload = call(tools.handle_job_cron, {"schedule": "0 9 * * *"})
+    assert payload["success"] is True
+    assert payload["cron"]["reused"] is True
+    assert payload["cron"]["id"] == "job-reused-1"
+
+
+def test_job_cron_fails_when_neither_created_nor_reused(tools, engine):
+    """handle_job_cron must only fail when both created and reused are false."""
+    engine.payload = {
+        "created": False,
+        "reused": False,
+        "command": "hermes cron create ...",
+        "message": "creation failed",
+    }
+    payload = call(tools.handle_job_cron, {})
+    assert payload["success"] is False
+    assert "creation failed" in payload["error"]
+
+
+def test_job_setup_surfaces_skill_warning(tools, monkeypatch):
+    """When install-skill reports a warning, handle_job_setup includes skill_warning."""
+    def invoke_stub(args, **_kwargs):
+        if args[0] == "setup":
+            return {"ok": True}, None
+        if args[0] == "install-skill":
+            return {"skill": "/tmp/SKILL.md", "warning": "Skill 'job-reach' is disabled in config.yaml"}, None
+        return {}, None
+
+    monkeypatch.setattr(tools, "_invoke", invoke_stub)
+    payload = call(tools.handle_job_setup, {})
+    assert payload["success"] is True
+    assert payload["skill"] == "/tmp/SKILL.md"
+    assert payload["skill_warning"] == "Skill 'job-reach' is disabled in config.yaml"

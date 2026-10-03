@@ -25,7 +25,7 @@ Verified against the live site before this scraper was written:
   ``.salary-snippet-container`` — company, location and salary, all best-effort
   (the layout shifts, so empty values are tolerated rather than fatal).
 
-Four behavioural notes worth keeping:
+Five behavioural notes worth keeping:
 
 * ``l=`` takes free text, so :data:`LOCATION_SLUGS` maps the plugin's slugs
   (``tokyo``) onto Japanese place names (``東京``) — Indeed's own market names.
@@ -37,14 +37,32 @@ Four behavioural notes worth keeping:
 * Every result page is read in **one** browser session, reached by navigating to
   the next ``start=`` URL rather than by clicking the pager — see
   :meth:`IndeedScraper.page_steps` for what that buys and what it costs.
+* Fast block detection and cooldown: on a Cloudflare-blocked network, Indeed
+  answers a plain HTTP GET with HTTP 403 and ``cf-mitigated: challenge`` in
+  ~0.25 s, whereas a stealth browser would hang for minutes before failing.
+  Before launching a browser session, :meth:`fetch_jobs` issues a cheap GET
+  probe (:func:`block_evidence`). If blocked, the evidence is recorded to disk
+  (``$JOBREACH_HOME/indeed-block.json``) with a 30-minute cooldown
+  (:data:`BLOCK_COOLDOWN_SECONDS`). During an active cooldown, subsequent
+  searches fail fast without probing or opening a browser. The cooldown duration
+  can be overridden via the ``JOBREACH_INDEED_COOLDOWN`` environment variable
+  (integer seconds; ``0`` disables the cooldown; unset defaults to 1800 s;
+  garbage values fall back to the default).
 """
 
 from __future__ import annotations
 
-from typing import Any
+import datetime
+import json
+import os
+import time
+from pathlib import Path
+from typing import Any, NamedTuple
 from urllib.parse import urlencode
 
+from ..config import jobreach_home
 from ..domain import JobPosting, SourcePlatform
+from ..errors import ScraperError
 from ..fetchers import (
     FetchResult,
     evaluate,
@@ -53,9 +71,141 @@ from ..fetchers import (
     wait_selector,
 )
 from ..logging_setup import get_logger
+from ..webclient import probe
 from .base import BaseScraper
 
 logger = get_logger("scrapers.indeed")
+
+#: Ceiling for the cheap block probe, in seconds. The probe exists to save
+#: minutes, not to be thorough: a Cloudflare-blocked network answers it with
+#: HTTP 403 in ~0.25 s, so a slow answer is itself a reason to stop waiting and
+#: let the browser try.
+PROBE_TIMEOUT_SECONDS = 10.0
+
+#: How long a confirmed block silences this board, in seconds. Long enough that
+#: a second search in the same session does not pay the browser budget again,
+#: short enough that a changed network (VPN, new IP) is picked up the same day.
+BLOCK_COOLDOWN_SECONDS = 1800
+
+#: Markers identifying a Cloudflare challenge in a probe response body. The
+#: ``cf-mitigated`` header is checked first; these cover the case where the
+#: challenge arrives as a 200 with the header stripped or renamed.
+CHALLENGE_MARKERS: tuple[str, ...] = (
+    "cf-mitigated",
+    "just a moment",
+    "security check",
+    "checking your browser",
+    "verify you are human",
+)
+
+
+class BlockInfo(NamedTuple):
+    """An active block: when the cooldown ends, why, and when it started."""
+
+    blocked_until: float
+    evidence: str
+    at: str
+
+
+def _cooldown_seconds() -> int:
+    """Return cooldown duration in seconds, consulting ``JOBREACH_INDEED_COOLDOWN``."""
+    raw = os.environ.get("JOBREACH_INDEED_COOLDOWN")
+    if raw is None:
+        return BLOCK_COOLDOWN_SECONDS
+    try:
+        val = int(raw.strip())
+        return val if val >= 0 else 0
+    except (ValueError, TypeError):
+        return BLOCK_COOLDOWN_SECONDS
+
+
+def _block_file() -> Path:
+    return jobreach_home() / "indeed-block.json"
+
+
+def active_block() -> BlockInfo | None:
+    """Return the active block, or ``None`` when Indeed may be tried again.
+
+    ``None`` covers every reason to proceed: no recorded block, a cooldown that
+    has expired, the cooldown disabled with ``JOBREACH_INDEED_COOLDOWN=0``, and
+    a state file that is missing or corrupt. The state file can never fail a
+    fetch — it may only save one.
+    """
+    cooldown = _cooldown_seconds()
+    if cooldown <= 0:
+        return None
+    try:
+        path = _block_file()
+        if not path.is_file():
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return None
+        blocked_until = float(payload["blocked_until"])
+        evidence = str(payload["evidence"])
+        at = str(payload.get("at", ""))
+        now = time.time()
+        if now >= blocked_until:
+            return None
+        return BlockInfo(blocked_until, evidence, at)
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
+def record_block(evidence: str) -> None:
+    """Record a block with timestamp and cooldown expiry to disk (best-effort)."""
+    cooldown = _cooldown_seconds()
+    if cooldown <= 0:
+        return
+    now = time.time()
+    blocked_until = now + cooldown
+    at_str = datetime.datetime.now(datetime.UTC).isoformat()
+    data = {
+        "blocked_until": blocked_until,
+        "evidence": evidence,
+        "at": at_str,
+    }
+    try:
+        path = _block_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data), encoding="utf-8")
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def clear_block() -> None:
+    """Clear any persisted block state from disk (best-effort)."""
+    try:
+        path = _block_file()
+        path.unlink(missing_ok=True)
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def block_evidence(url: str) -> str | None:
+    """Probe *url* for evidence of a bot block.
+
+    Issues a single HTTP probe via :func:`jobreach.webclient.probe`. Returns a
+    short evidence string when the network is known to be blocked:
+    * HTTP status 401, 403, or 429 -> "HTTP {status} on a plain GET"
+    * A ``cf-mitigated`` header -> "cf-mitigated: {value}"
+    * A challenge marker in the response body -> "challenge page marker {marker!r}"
+
+    Every other outcome (200, 404, timeout, DNS failure, connection reset)
+    returns ``None``. The probe is a fast path to a block, never a second opinion
+    that may veto a fetch which would have worked.
+    """
+    result = probe(url, timeout=PROBE_TIMEOUT_SECONDS)
+    if result.status in (401, 403, 429):
+        return f"HTTP {result.status} on a plain GET"
+    if "cf-mitigated" in result.headers:
+        return f"cf-mitigated: {result.headers['cf-mitigated']}"
+    body_prefix = result.text[:4000].lower()
+    for marker in CHALLENGE_MARKERS:
+        if marker in body_prefix:
+            return f"challenge page marker {marker!r}"
+    return None
+
 
 BASE_URL = "https://jp.indeed.com"
 SEARCH_PATH = "/jobs"
@@ -276,8 +426,31 @@ class IndeedScraper(BaseScraper):
 
     async def fetch_jobs(self) -> list[JobPosting]:
         """Read every result page in a single browser session."""
+        block = active_block()
+        if block is not None:
+            remaining_s = max(0.0, block.blocked_until - time.time())
+            remaining_min = max(1, int(round(remaining_s / 60)))
+            since = f"blocked at {block.at}, " if block.at else ""
+            detail = (
+                f"{block.evidence}, {since}{remaining_min}m remaining; "
+                "set JOBREACH_INDEED_COOLDOWN=0 to retry now"
+            )
+            raise ScraperError(
+                f"{self.platform.value}: the site served a bot challenge instead of "
+                f"listings (skipped: {detail})"
+            )
+
+        url = self.build_search_url(1)
+        evidence = block_evidence(url)
+        if evidence:
+            record_block(evidence)
+            raise ScraperError(
+                f"{self.platform.value}: the site served a bot challenge instead of "
+                f"listings (cheap GET probe: {evidence})"
+            )
+
         result = await self.fetch(
-            self.build_search_url(1),
+            url,
             steps=self.page_steps(),
             wait_selector=CARD_SELECTOR,
             timeout_ms=max(self.timeout_ms, FETCH_BUDGET_MS),

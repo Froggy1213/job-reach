@@ -1,7 +1,7 @@
 ---
 name: job-search
 description: Find jobs on Japanese boards and track what is new.
-version: 2.5.0
+version: 2.5.1
 author: Froggy1213
 license: MIT
 platforms: [macos, linux, windows]
@@ -44,6 +44,10 @@ supported). Four boards need no extra software at all; `indeed` and `mynavi2027`
 need a browser backend (Scrapling, which the plugin auto-detects, or the venv
 `job_setup` builds); `linkedin` needs `opencli` with Chrome running. No MCP
 server is involved. `job_status` reports exactly what this machine has.
+
+Note on skill activation: `job_setup` copies this skill into
+`~/.hermes/skills/productivity/job-reach/`. If Hermes does not auto-trigger the skill
+after install, check that `skills.disabled` in Hermes' `config.yaml` is not blocking it.
 
 ## The tools
 
@@ -98,17 +102,18 @@ before assuming `off`:
 | Green | `green` | ✅ server-side | ✅ slug/地名 | ~1 s | IT/Web industry. Salary is usually on the card. Payload embedded in the page. |
 | Daijob | `daijob` | ✅ server-side | ✅ slug (東京/大阪) | ~2 s | Bilingual and foreign-capital employers. Server-rendered HTML. |
 | Japan Dev | `japandev` | ⚠️ titles only | ❌ | ~1 s | English-speaking tech jobs. **The site ignores `?query=`** — the plugin filters titles itself, so Japanese keywords match nothing here. |
-| Indeed Japan | `indeed` | ✅ server-side | ✅ slug or 地名 | ~30 s | The widest market. Stealth browser; the only board that can be bot-blocked, and its time is **network-dependent** — from a Cloudflare-blocked IP it never resolves, so report a timeout as a block rather than retrying. |
-| Mynavi 2027 | `mynavi2027` | ⚠️ best-effort | ❌ ignored | ~1 min | New-graduate, nationwide, by occupation code. A code is a company-level tag, so most cards are not design roles — pair it with `validation="local"`. |
+| Indeed Japan | `indeed` | ✅ server-side | ✅ slug or 地名 | <1 s / ~4 min | The widest market. Stealth browser. Fast HTTP pre-check catches Cloudflare bot blocks in <1 s (with 30-min cooldown); unblocked worst case takes up to ~4 min. If blocked, omit from `sources` for the rest of the session and report the block — never as zero jobs. |
+| Mynavi 2027 | `mynavi2027` | ⚠️ best-effort | ❌ ignored | up to ~3 min | New-graduate, nationwide, by occupation code. A code is a company-level tag, so most cards are not design roles — pair it with `validation="local"`. Multi-step browser scrape can take up to ~3 min. |
 | LinkedIn | `linkedin` | ✅ server-side | ✅ | ~20 s | Needs Chrome running with the OpenCLI extension. |
 
 **Rule of thumb:** for any general or non-design search
 (`"frontend engineer"`, `"marketing"`, `"データサイエンティスト"`) pass
 `sources: ["wantedly"]` plus `"green"` and/or `"daijob"` — all three are fast and
-browser-free. Add `"indeed"` for the widest net (it costs ~30 s), and
-`"japandev"` when the user wants English-speaking workplaces. The default
-(`wantedly, mynavi2027, linkedin`) is the design-in-Tokyo feed the project was
-built around; it is *not* the best choice for an arbitrary query.
+browser-free. Add `"indeed"` for the widest net (up to ~4 min unblocked, or
+<1 s if blocked), and `"japandev"` when the user wants English-speaking
+workplaces. The default (`wantedly, mynavi2027, linkedin`) is the design-in-Tokyo
+feed the project was built around; it is *not* the best choice for an arbitrary
+query.
 
 `location` accepts a slug (`tokyo`, `osaka`), a Japanese place name (`大阪`), or
 `any` for nationwide. Each board maps it to its own codes (Green uses prefecture
@@ -119,8 +124,9 @@ rather than wrong — and Mynavi ignores it entirely.
 
 1. **`job_status`** when anything seems off, or on the first run of a session.
    It reports the browser backend and whether each board can run.
-2. **`job_search`** with the user's query. Expect 4–90 seconds depending on the
-   boards — wait, do not retry in a loop.
+2. **`job_search`** with the user's query. Expect from seconds up to 3–4 minutes
+   depending on boards (Indeed up to ~4 min unblocked, Mynavi up to ~3 min) —
+   wait, do not retry in a loop.
 3. **`job_note`**, passing the exact `result` object `job_search` returned.
    This is the default deliverable; skip it only when the user explicitly asks
    for inline output only.
@@ -151,19 +157,27 @@ a search fails only on Indeed/Mynavi, that is why.
 
 ## Indeed Japan
 
-Indeed is scraped by the plugin (stealth browser). Three things make its output
-trustworthy, and all three are enforced in code:
+Indeed is scraped by the plugin (stealth browser). Four things make its output
+trustworthy, and all four are enforced in code:
 
+- a fast pre-check runs one plain GET before launching any browser: an HTTP 401/403/429,
+  a `cf-mitigated` header, or a Cloudflare challenge body fails the board as "bot challenge"
+  in <1 s without starting a browser;
+- after a detected block, Indeed is skipped for 30 minutes (env override
+  `JOBREACH_INDEED_COOLDOWN`, integer seconds, `0` disables it);
 - the URL always carries `&hl=ja`, and a response from `www.indeed.com` is a
   hard failure — those would be American listings;
-- `jk` (the listing id) is the dedup key, so re-runs do not re-report;
-- a Cloudflare challenge is reported as **blocked**, never as "no jobs".
+- `jk` (the listing id) is the dedup key, so re-runs do not re-report.
 
-**When Indeed comes back blocked or empty,** fall back to fetching it yourself
-and pushing the cards through `job_ingest` — the full recipe, including the
-extraction script, is in `references/indeed.md`. Never invent, guess, or
-"reconstruct" listings: a blocked board means **zero** results, say exactly
-that, and move on.
+On an unblocked network, a worst-case scrape (stealth attempt plus dynamic fallback) can
+take up to ~4 minutes.
+
+**If Indeed comes back blocked:** drop it from `sources` for the rest of the session
+instead of retrying it, and report the block to the user — **never** read a block as
+"no jobs today". Fall back to fetching it yourself and pushing the cards through
+`job_ingest` — the full recipe, including the extraction script, is in
+`references/indeed.md`. Never invent, guess, or "reconstruct" listings: a blocked board
+means **zero** results, say exactly that, and move on.
 
 ## Reading one listing in detail
 
@@ -278,10 +292,31 @@ sync `jobreach/notes.py` from `~/My_projects/Job_reach`.
 Finish with a hand-written "read this first" block above the tables (direct hits for the
 user's exact ask, similar roles, per-board caveats): the tables alone are raw data.
 
+## Updating
+
+The installed copy under `$HERMES_HOME/plugins/job-reach/` (typically
+`~/.hermes/plugins/job-reach/`) is a **snapshot**, not a symlink, so edits in
+the repository are invisible until copied over:
+
+```bash
+rsync -a --delete --exclude=.git --exclude='*cache*' --exclude=__pycache__ \
+      --exclude=.env --filter='protect .env' \
+      ~/My_projects/Job_reach/ ~/.hermes/plugins/job-reach/
+cp skills/job-search/SKILL.md ~/.hermes/skills/productivity/job-reach/SKILL.md
+```
+
+- **Engine changes** (`jobreach/**`): live on the next tool call immediately,
+  because each call spawns `python -m jobreach` in a fresh child process.
+- **Plugin changes** (`tools.py`, `schemas.py`, `__init__.py`): require a
+  **Hermes restart**, because those modules load directly inside Hermes' own
+  process at startup.
+
 ## Pitfalls
 
-1. **Treating a 30–90 s scrape as a hang.** Two boards drive a real browser
-   against live sites. Do not re-issue the search.
+1. **Treating a long scrape as a hang.** Two boards drive a real browser: Mynavi
+   takes up to ~3 minutes, and Indeed can take up to ~4 minutes on an unblocked
+   network (though a Cloudflare bot block is detected in <1 s with a 30-minute
+   cooldown). Do not re-issue the search in a loop.
 2. **Reading `new: 0` as failure.** It means nothing changed since the last
    run. Check `summary.total` for how many currently match.
 3. **Routing a general keyword to Mynavi.** It is occupation-code driven,
@@ -296,8 +331,11 @@ user's exact ask, similar roles, per-board caveats): the tables alone are raw da
    (`デザイナー`, `エンジニア`) or `location="any"` to widen.
 8. **Assuming cron fires without the gateway.** The ticker runs inside the
    Hermes gateway process. If it is stopped, nothing fires.
-9. **Expecting LinkedIn to work without Chrome.** `opencli linkedin whoami`
-   must succeed first; if it hangs, Chrome is not running.
+9. **Expecting LinkedIn to work without Chrome, or treating `whoami` as a gate.**
+   LinkedIn needs Chrome running with the OpenCLI extension. However, do NOT use
+   `opencli linkedin whoami` as a readiness probe: it can return `Navigation rejected`
+   even when the board itself is working and returns 25 live listings on the same
+   machine. Check `job_status` or test a search directly instead.
 10. **Pinning a backend and leaving it pinned.** `JOBREACH_BACKEND` is a
     debugging tool; `auto` is the right setting in normal use.
 11. **Sending a Japanese keyword to Japan Dev.** Its titles are English and its
@@ -334,6 +372,7 @@ user's exact ask, similar roles, per-board caveats): the tables alone are raw da
 - [ ] Fresh listings were flagged as new, and the note was written when the
       user wanted a saved artefact.
 - [ ] Indeed (if requested): a blocked run was reported as blocked rather than
-      filled in, and no US listings (`www.indeed.com`) were presented as Tokyo
-      jobs.
-- [ ] If a scrape appeared to hang: it was given at least two minutes.
+      as zero jobs, dropped from `sources` for the rest of the session, and no
+      US listings (`www.indeed.com`) were presented as Tokyo jobs.
+- [ ] If a scrape appeared to hang: it was given at least 3–4 minutes when browser
+      boards (Indeed, Mynavi) were included.

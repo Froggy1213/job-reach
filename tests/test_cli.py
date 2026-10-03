@@ -13,6 +13,7 @@ only question is which value reaches the request.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -650,3 +651,126 @@ def test_search_dispatch_uses_the_configured_relevance_defaults(
     assert code == EXIT_OK
     assert seen[-1].validation == "local"
     assert seen[-1].validation_profile == "engineering"
+
+
+# --------------------------------------------------------------------------- #
+# Doctor SQLite readiness, disabled skill warnings, and cron reuse
+# --------------------------------------------------------------------------- #
+
+
+def test_doctor_text_mentions_sqlite_readiness(
+    data_home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+):
+    """Doctor text output must report sqlite version and state if supported or too old."""
+    monkeypatch.setattr("jobreach.scrapling.scrapling_python", lambda: (None, ""))
+    monkeypatch.setattr("jobreach.scrapers.base.probe_playwright", lambda: (False, "no playwright"))
+
+    # 1. Supported sqlite
+    code, out, _ = run(capsys, "doctor")
+    assert code == EXIT_OK
+    assert "sqlite" in out
+    assert "(>= 3.35 required)" in out
+
+    # 2. Too old (monkeypatched to 3.34)
+    monkeypatch.setattr("sqlite3.sqlite_version_info", (3, 34, 0))
+    monkeypatch.setattr("sqlite3.sqlite_version", "3.34.0")
+    code, out, _ = run(capsys, "doctor")
+    assert code == EXIT_OK
+    assert "3.34.0" in out
+    assert "TOO OLD — the store needs >= 3.35; every save would fail" in out
+
+
+def test_disabled_skill_warning_finds_both_yaml_forms(
+    data_home: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """disabled_skill_warning must detect disabled skills in block and inline forms and fail open."""
+    from jobreach.install import disabled_skill_warning
+
+    config_path = Path(os.environ["HERMES_HOME"]) / "config.yaml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # 1. Block form
+    config_path.write_text(
+        """skills:
+  disabled:
+    - job-reach
+    - other-skill
+""",
+        encoding="utf-8",
+    )
+    warn = disabled_skill_warning()
+    assert warn is not None
+    assert "job-reach" in warn
+    assert "skills.disabled" in warn
+
+    # 2. Inline form
+    config_path.write_text(
+        """skills:
+  disabled: [job-reach, weather]
+""",
+        encoding="utf-8",
+    )
+    warn = disabled_skill_warning()
+    assert warn is not None
+    assert "job-reach" in warn
+
+    # 3. Absent from disabled list
+    config_path.write_text(
+        """skills:
+  disabled: [weather, translator]
+""",
+        encoding="utf-8",
+    )
+    assert disabled_skill_warning() is None
+
+    # 4. No skills section (different section has disabled)
+    config_path.write_text(
+        """plugins:
+  disabled: [job-reach]
+""",
+        encoding="utf-8",
+    )
+    assert disabled_skill_warning() is None
+
+
+def test_install_skill_surfaces_disabled_warning(
+    data_home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+):
+    """install-skill must output the warning to stderr in text mode and in payload for --json."""
+    config_path = Path(os.environ["HERMES_HOME"]) / "config.yaml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("skills:\n  disabled:\n    - job-reach\n", encoding="utf-8")
+
+    # Text mode
+    code, out, err = run(capsys, "install-skill")
+    assert code == EXIT_OK
+    assert "Skill installed:" in out
+    assert "skills.disabled" in err
+
+    # JSON mode
+    code, out, _ = run(capsys, "install-skill", "--json")
+    assert code == EXIT_OK
+    payload = json.loads(out)
+    assert "skill" in payload
+    assert "warning" in payload
+    assert "skills.disabled" in payload["warning"]
+
+
+def test_install_cron_cli_succeeds_on_reused_job(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+):
+    """A reused cron job must exit EXIT_OK and not print the manual run suggestion."""
+    monkeypatch.setattr(
+        "jobreach.install.install_cron",
+        lambda **_kw: {
+            "created": False,
+            "reused": True,
+            "command": "hermes cron edit 1",
+            "message": "already installed and up to date; nothing created",
+        },
+    )
+
+    code, out, err = run(capsys, "install-cron")
+    assert code == EXIT_OK
+    assert "already installed and up to date; nothing created" in out
+    assert "Run this manually" not in err

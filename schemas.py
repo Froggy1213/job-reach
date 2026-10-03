@@ -10,7 +10,8 @@ carry the operational knowledge the model needs to choose correctly:
 
 * which board answers which kind of query (Wantedly = anything in any language,
   Mynavi = new-grad design only, Indeed = the widest market but a browser),
-* that a scrape takes 30–90 seconds and must not be retried in a loop,
+* that a scrape takes from seconds up to ~4 minutes (Indeed up to ~4 min unblocked,
+  Mynavi up to ~3 min) and must not be retried in a loop,
 * that ``job_ingest`` is the *fallback* when a scraper could not run — today
   Indeed is scraped like any other board, so ingest is for the runs automation
   loses (a challenge the stealth browser could not solve, a board the plugin
@@ -28,16 +29,18 @@ _SEARCH = {
         "Fast, browser-free boards: 'wantedly' (general-purpose, any language, "
         "read over its JSON API), 'green' (IT/Web industry, salary usually on "
         "the card), 'daijob' (bilingual and foreign-capital employers), "
-        "'japandev' (English-speaking tech jobs). Slower boards: 'indeed' (the "
-        "widest market, ~30 s, drives a stealth browser), 'mynavi2027' "
-        "(new-graduate design roles only; ignores location), 'linkedin' (via "
-        "the OpenCLI Chrome bridge; needs Chrome running). With no keyword it "
-        "runs the built-in design-in-Tokyo feed. Listings are deduplicated "
-        "against the local database and flagged 'is_new' when this run is the "
-        "first to see them; cards that are the same vacancy on the same board "
-        "(same company and title) are collapsed into one, which reports how "
-        "many it absorbed. A live scrape takes 1-90 seconds depending on the "
-        "boards — do not retry in a loop."
+        "'japandev' (English-speaking tech jobs). Slower browser boards: 'indeed' "
+        "(widest market; hard blocks detected in <1 s with 30-minute cooldown, "
+        "up to ~4 min unblocked), 'mynavi2027' (new-grad design only, ignores "
+        "location, up to ~3 min), 'linkedin' (via OpenCLI Chrome bridge; needs "
+        "Chrome running). If indeed comes back blocked, leave it out of sources "
+        "for the rest of the session and report the block — never as zero jobs. "
+        "With no keyword it runs the built-in design-in-Tokyo feed. Listings are "
+        "deduplicated against the local database and flagged 'is_new' when first "
+        "seen; cards that are the same vacancy on the same board (same company and "
+        "title) are collapsed into one, reporting duplicates absorbed. A live scrape "
+        "takes from seconds up to ~4 minutes depending on boards — do not retry in a "
+        "loop."
     ),
     "parameters": {
         "type": "object",

@@ -102,8 +102,10 @@ export JOBREACH_SCRAPLING_PYTHON=/path/to/venv/bin/python      # Windows: ...\Sc
 hermes job-reach setup
 
 # LinkedIn (optional)
-#   install opencli and keep Chrome running with its extension; verify with
-#   `opencli linkedin whoami`
+#   install opencli and keep Chrome running with its extension; check with
+#   `hermes job-reach doctor` or run a test search directly (do not rely on
+#   `opencli linkedin whoami`, which can return `Navigation rejected` even on
+#   a working setup)
 ```
 
 `hermes job-reach setup` prints what it found and what it skipped; it never
@@ -159,7 +161,9 @@ hermes job-reach doctor         # verify: backend, boards, interpreter
 ```
 
 `setup` also copies the bundled skill into `~/.hermes/skills/productivity/job-reach/`
-so it can auto-trigger. You can equally just ask the agent to *"run job_setup"*.
+so it can auto-trigger. (If the skill does not auto-trigger after setup, check that
+`skills.disabled` in Hermes' `config.yaml` is not blocking it.) You can equally
+just ask the agent to *"run job_setup"*.
 
 Then:
 
@@ -269,7 +273,7 @@ call — no Hermes restart.
 | Setting | `config.yaml` path | Default | Effect |
 |---------|--------------------|---------|--------|
 | `default_keyword` | `plugins.entries.job-reach.settings.default_keyword` | `""` | Keyword `job_search` uses when the caller passes none. Empty means the built-in design feed. |
-| `default_sources` | `plugins.entries.job-reach.settings.default_sources` | `[]` | Boards searched when the caller passes no `sources`. Empty means the built-in board set (`wantedly`, `mynavi2027`, `linkedin`). |
+| `default_sources` | `plugins.entries.job-reach.settings.default_sources` | `[]` | Boards searched when the caller passes no `sources`. Empty means the built-in board set (`wantedly`, `mynavi2027`, `linkedin`). Warning: adding `indeed` here makes every bare search and the daily monitor pay its worst-case time on slow networks (up to ~4 min unblocked, capped at <1 s with a 30-minute cooldown on hard blocks). |
 | `note_subfolder` | `plugins.entries.job-reach.settings.note_subfolder` | `"job-searches"` | Subfolder inside the Obsidian vault that `job_note` writes into. |
 | `max_results` | `plugins.entries.job-reach.settings.max_results` | unset | How many listings `job_list` returns when no `limit` is passed, and the limit `job_search` falls back to. Unset means the engine's own default — all matches for a search — so set it if you want searches capped. An explicit `limit` always wins. |
 | `default_validation` | `plugins.entries.job-reach.settings.default_validation` | `"off"` | Relevance filter used when a call passes no `validation` (a bare `jobreach search` passes no `--validate` either): `off` returns every match, `local` drops the obvious noise with free regex heuristics, `llm` classifies against the profile below and needs an API key. Set it to `local` to make a bare search return the relevant listings instead of everything. An explicit argument always wins. |
@@ -366,7 +370,12 @@ rsync -a --delete --exclude '.git/' --exclude '__pycache__/' \
 hermes job-reach install-skill     # refresh the auto-discoverable skill copy
 ```
 
-Restart Hermes afterwards — plugins are imported when a session starts.
+What takes effect when:
+- **Engine changes** (`jobreach/**`): live on the next tool call immediately,
+  because `tools.py` spawns `python -m jobreach` in a fresh child process per call.
+- **Plugin changes** (`tools.py`, `schemas.py`, `__init__.py`): require a
+  **Hermes restart**, because those modules load directly inside Hermes' own
+  process at startup.
 
 ---
 

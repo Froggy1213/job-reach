@@ -34,8 +34,10 @@ class LinkedInScraper(CliScraper):
     install_hint = (
         "LinkedIn search needs the OpenCLI Chrome extension with Chrome running:\n"
         "  1. start Chrome (the extension must be loaded)\n"
-        "  2. verify with: opencli linkedin whoami\n"
-        "If that hangs, Chrome is not running."
+        "  2. check status with: python -m jobreach doctor (or run a search directly)\n"
+        "Note: 'opencli linkedin whoami' is NOT a readiness probe (it can answer\n"
+        "'Navigation rejected' even on a working setup that returns listings).\n"
+        "If a search hangs or fails to connect, Chrome is not running."
     )
 
     @property

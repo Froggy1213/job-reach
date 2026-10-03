@@ -474,6 +474,10 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     print(f"  data dir       {payload['data_dir']}")
     print(f"  database       {payload['database']}"
           f"{'' if payload['database_exists'] else '  (not created yet)'}")
+    if payload.get("sqlite_ok"):
+        print(f"  sqlite         {payload['sqlite']}  (>= {payload['sqlite_required']} required)")
+    else:
+        print(f"  sqlite         {payload['sqlite']}  TOO OLD — the store needs >= {payload['sqlite_required']}; every save would fail")
     print(f"  interpreter    {payload['engine_interpreter']}  [{payload['engine_interpreter_source']}]")
     backend = payload.get("backend") or {}
     selected = backend.get("selected") or {}
@@ -516,13 +520,19 @@ def _cmd_setup(args: argparse.Namespace) -> int:
 
 
 def _cmd_install_skill(args: argparse.Namespace) -> int:
-    from .install import install_skill
+    from .install import disabled_skill_warning, install_skill
 
     path = install_skill()
+    warning = disabled_skill_warning()
     if args.json:
-        _print_json({"skill": str(path)})
+        payload: dict[str, Any] = {"skill": str(path)}
+        if warning:
+            payload["warning"] = warning
+        _print_json(payload)
     else:
         print(f"Skill installed: {path}")
+        if warning:
+            print(warning, file=sys.stderr)
     return EXIT_OK
 
 
@@ -537,13 +547,14 @@ def _cmd_install_cron(args: argparse.Namespace) -> int:
         deliver=args.deliver,
         name=args.name,
     )
+    ok = bool(payload.get("created") or payload.get("reused"))
     if args.json:
         _print_json(payload)
     else:
         print(payload["message"])
-        if not payload["created"]:
+        if not ok:
             print("Run this manually:\n  " + payload["command"], file=sys.stderr)
-    return EXIT_OK if payload["created"] else EXIT_FAILURE
+    return EXIT_OK if ok else EXIT_FAILURE
 
 
 # --------------------------------------------------------------------------- #

@@ -221,3 +221,99 @@ def test_importing_the_engine_pulls_in_nothing_third_party():
     baseline = run_probe("pass")
     with_engine = run_probe(ENGINE_IMPORTS)
     assert with_engine == baseline, f"the engine imported extra modules: {sorted(set(with_engine) - set(baseline))}"
+
+
+# --- generated monitor script runtime resolution ---------------------------
+
+
+def test_generated_monitor_script_fails_gracefully_when_plugin_dir_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """When baked plugin dir is missing and no candidate exists: exit 1, no traceback."""
+    from jobreach.install import MONITOR_SCRIPT_TEMPLATE
+
+    hermes_home = tmp_path / "hermes-empty"
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.delenv("JOBREACH_PLUGIN_DIR", raising=False)
+
+    baked_path = "/nonexistent/baked/plugin-path"
+    script_path = tmp_path / "monitor.py"
+    script_path.write_text(
+        MONITOR_SCRIPT_TEMPLATE.format(
+            plugin=baked_path,
+            python=sys.executable,
+            args=[],
+            job_name="job-reach-monitor",
+        ),
+        encoding="utf-8",
+    )
+
+    proc_res = subprocess.run([sys.executable, str(script_path)], capture_output=True, text=True)
+    assert proc_res.returncode == 1
+    assert baked_path in proc_res.stderr
+    assert "Traceback" not in proc_res.stderr
+    assert "job-reach monitor: plugin directory not found" in proc_res.stderr
+
+
+def test_generated_monitor_script_prefers_installed_candidate_over_baked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """An installed candidate under $HERMES_HOME/plugins/job-reach wins over baked PLUGIN_DIR."""
+    from jobreach.install import MONITOR_SCRIPT_TEMPLATE
+
+    hermes_home = tmp_path / "hermes-home"
+    installed_dir = hermes_home / "plugins" / "job-reach"
+    installed_pkg = installed_dir / "jobreach"
+    installed_pkg.mkdir(parents=True, exist_ok=True)
+    (installed_pkg / "__main__.py").write_text(
+        "import sys; print('FROM_INSTALLED'); sys.exit(0)\n", encoding="utf-8"
+    )
+
+    baked_dir = tmp_path / "baked-repo"
+    baked_pkg = baked_dir / "jobreach"
+    baked_pkg.mkdir(parents=True, exist_ok=True)
+    (baked_pkg / "__main__.py").write_text(
+        "import sys; print('FROM_BAKED'); sys.exit(0)\n", encoding="utf-8"
+    )
+
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.delenv("JOBREACH_PLUGIN_DIR", raising=False)
+
+    script_path = tmp_path / "monitor.py"
+    script_path.write_text(
+        MONITOR_SCRIPT_TEMPLATE.format(
+            plugin=str(baked_dir),
+            python=sys.executable,
+            args=[],
+            job_name="job-reach-monitor",
+        ),
+        encoding="utf-8",
+    )
+
+    proc_res = subprocess.run([sys.executable, str(script_path)], capture_output=True, text=True)
+    assert proc_res.returncode == 0
+    assert "FROM_INSTALLED" in proc_res.stdout
+    assert "FROM_BAKED" not in proc_res.stdout
+
+
+def test_generated_monitor_script_guards_vanished_interpreter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """When the engine interpreter is gone: exit 1, naming the path, no traceback."""
+    from jobreach.install import MONITOR_SCRIPT_TEMPLATE
+
+    script_path = tmp_path / "monitor.py"
+    script_path.write_text(
+        MONITOR_SCRIPT_TEMPLATE.format(
+            plugin=str(PROJECT_ROOT),
+            python="/nonexistent/bin/python",
+            args=[],
+            job_name="job-reach-monitor",
+        ),
+        encoding="utf-8",
+    )
+
+    proc_res = subprocess.run([sys.executable, str(script_path)], capture_output=True, text=True)
+    assert proc_res.returncode == 1
+    assert "/nonexistent/bin/python" in proc_res.stderr
+    assert "Traceback" not in proc_res.stderr
