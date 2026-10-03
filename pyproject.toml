@@ -1,6 +1,6 @@
 [project]
 name = "job-reach-hermes"
-version = "2.5.0"
+version = "2.5.1"
 description = "Hermes Agent plugin: search Japanese job boards and track new listings"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -48,7 +48,18 @@ packages = ["jobreach"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# `--confcutdir=tests` is load-bearing, not tidiness. The repository root holds
+# the Hermes plugin entry point (`__init__.py`), which makes the root look like a
+# Python package. Since pytest 8.4 it collects the rootdir as a `Package` and
+# imports that `__init__.py` as a test module; the import only succeeds when the
+# checkout directory happens to be a valid identifier (`Job_reach` is,
+# `job-reach` — the name `git clone` uses — is not), and when it is not, the run
+# dies with 592 collection errors about `from .tools import …` having no parent
+# package. Bounding the conftest cut directory to `tests/` keeps every ancestor
+# out of pytest's import machinery. It is resolved against the invocation
+# directory, so run pytest from the repository root; a future root-level
+# `conftest.py` would no longer be loaded (there is none today).
+addopts = "-q --confcutdir=tests"
 
 [tool.ruff]
 line-length = 100

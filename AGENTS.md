@@ -135,12 +135,25 @@ hermes plugins validate .
 hermes plugins doctor . --ci
 ```
 
+Run those from the repository root. `pyproject.toml`'s `addopts` carries
+`--confcutdir=tests`, and that flag is load-bearing: the root `__init__.py` makes
+the repository look like a Python package, and pytest ≥ 8.4 would otherwise
+collect the rootdir as a `Package` and import that file as a test module — which
+works only when the checkout directory is a valid Python identifier (`Job_reach`
+is; the `job-reach` that `git clone` creates is not). From another directory the
+flag resolves elsewhere and pytest refuses to start.
+
 The suites a change usually has to answer to, runnable on their own while
 iterating: `tests/test_plugin_contract.py` (manifest ↔ registration
 invariants), `tests/test_tools.py` (handler envelopes, settings plumbing,
 `max_results` defaults), `tests/test_settings.py` (the `JOBREACH_SETTING_*`
 bridge), and `tests/test_platforms.py` (portability). The full-suite command
 above still runs everything.
+
+`.github/workflows/ci.yml` runs the same gates on every push and pull request —
+ruff, the suite on Python 3.11 *and* 3.12 (the manifest's `requires-python`), and
+`tools_acceptance.py` — so a local pass is what CI will say. It deliberately has
+no browser and no `hermes` binary: neither exists on a runner.
 
 For the end-to-end path a test fixture tends to fake — registration through a
 `PluginContext`, the real subprocess bridge, and a setting observably reaching
@@ -166,6 +179,12 @@ No Hermes restart is needed for engine changes: `tools.py` spawns
 `python -m jobreach` in a fresh subprocess per call, so the next tool call runs
 the new code. Changes to `tools.py`/`schemas.py`/`__init__.py` *do* need one,
 because those load inside Hermes' own process.
+
+Copying `SKILL.md` is not always enough for the skill to trigger: a name listed
+under `skills.disabled` in `$HERMES_HOME/config.yaml` is suppressed no matter
+what is on disk, and `jobreach install-skill` warns about exactly that (there is
+no `hermes skills enable`; the list is edited in `config.yaml` or through
+`hermes skills config`).
 
 To exercise the real end-to-end path (subprocess bridge, SQLite, JSON):
 

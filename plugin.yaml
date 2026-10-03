@@ -1,5 +1,5 @@
 name: job-reach
-version: "2.5.0"
+version: "2.5.1"
 description: >-
   Search Japanese job boards (Wantedly, Indeed, Green, Daijob, Japan Dev,
   Mynavi 2027, LinkedIn) and track which listings are new since the last run.
@@ -105,7 +105,11 @@ config_schema:
     type: list
     required: false
     default: []
-    description: "Boards searched by default. Defaults to [wantedly, mynavi2027, linkedin]."
+    description: >-
+      Boards searched by default (defaults to [wantedly, mynavi2027, linkedin]).
+      Warning: adding indeed makes every bare search and the daily monitor pay
+      its worst case on a slow network (up to ~4 min unblocked, capped at <1 s
+      with a 30-minute cooldown on hard blocks).
   note_subfolder:
     type: str
     required: false
