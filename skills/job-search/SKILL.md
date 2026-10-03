@@ -98,7 +98,7 @@ before assuming `off`:
 | Green | `green` | ✅ server-side | ✅ slug/地名 | ~1 s | IT/Web industry. Salary is usually on the card. Payload embedded in the page. |
 | Daijob | `daijob` | ✅ server-side | ✅ slug (東京/大阪) | ~2 s | Bilingual and foreign-capital employers. Server-rendered HTML. |
 | Japan Dev | `japandev` | ⚠️ titles only | ❌ | ~1 s | English-speaking tech jobs. **The site ignores `?query=`** — the plugin filters titles itself, so Japanese keywords match nothing here. |
-| Indeed Japan | `indeed` | ✅ server-side | ✅ slug or 地名 | ~30 s | The widest market. Stealth browser; the only board that can be bot-blocked. |
+| Indeed Japan | `indeed` | ✅ server-side | ✅ slug or 地名 | ~30 s | The widest market. Stealth browser; the only board that can be bot-blocked, and its time is **network-dependent** — from a Cloudflare-blocked IP it never resolves, so report a timeout as a block rather than retrying. |
 | Mynavi 2027 | `mynavi2027` | ⚠️ best-effort | ❌ ignored | ~1 min | New-graduate, nationwide, by occupation code. A code is a company-level tag, so most cards are not design roles — pair it with `validation="local"`. |
 | LinkedIn | `linkedin` | ✅ server-side | ✅ | ~20 s | Needs Chrome running with the OpenCLI extension. |
 

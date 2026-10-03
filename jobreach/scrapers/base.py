@@ -375,6 +375,12 @@ class BaseScraper(ABC):
                         if step.get("optional") and await page.locator(selector).count() == 0:
                             continue
                         await page.locator(selector).first.click()
+                    if "goto" in step:
+                        await self.goto(
+                            page,
+                            str(step["goto"]),
+                            wait_until=str(step.get("wait_until") or "domcontentloaded"),
+                        )
                     if "wait_load" in step:
                         await page.wait_for_load_state(str(step["wait_load"]))
                     if "wait_selector" in step:

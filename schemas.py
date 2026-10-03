@@ -8,17 +8,18 @@ code.
 Descriptions are written for an LLM that has never seen this project, and they
 carry the operational knowledge the model needs to choose correctly:
 
-* which board answers which kind of query (Wantedly = anything, Mynavi =
-  new-grad design only, Indeed = ingest-only),
+* which board answers which kind of query (Wantedly = anything in any language,
+  Mynavi = new-grad design only, Indeed = the widest market but a browser),
 * that a scrape takes 30–90 seconds and must not be retried in a loop,
-* that ``job_ingest`` is the *only* way Indeed Japan listings enter the store.
+* that ``job_ingest`` is the *fallback* when a scraper could not run — today
+  Indeed is scraped like any other board, so ingest is for the runs automation
+  loses (a challenge the stealth browser could not solve, a board the plugin
+  does not know, cards a browser tool already returned).
 """
 
 from __future__ import annotations
 
 from typing import Any
-
-TOOLSET = "job_reach"
 
 _SEARCH = {
     "name": "job_search",
@@ -220,7 +221,11 @@ _LIST = {
             "text": {"type": "string", "description": "Substring match on title, company or location."},
             "source": {
                 "type": "string",
-                "description": "Restrict to one board: wantedly, mynavi_2027, linkedin, indeed.",
+                "description": (
+                    "Restrict to one board: 'wantedly', 'indeed', 'green', "
+                    "'daijob', 'japandev', 'mynavi2027' or 'linkedin'. Aliases "
+                    "such as 'mynavi', 'japan-dev' and 'green-japan' are accepted."
+                ),
             },
             "limit": {
                 "type": "integer",

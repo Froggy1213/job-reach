@@ -234,6 +234,43 @@ def _csv(value: Any) -> str:
     return _str_arg({"value": value}, "value") or ""
 
 
+def _new_since_predicate(threshold: str) -> Callable[[Mapping[str, Any]], bool]:
+    """Build the predicate behind ``job_list``'s ``new_since`` argument.
+
+    The comparison has to be on *instants*, not on the text. The engine writes
+    ``scraped_at`` as ``…T02:31:39.859109+00:00``, while a caller naturally
+    writes an ISO-8601 timestamp, and ``"…T02:31:39Z"`` sorts **below**
+    ``"…T02:31:39.859109+00:00"`` as a string (``'Z'`` > ``'.'``). A text
+    compare therefore silently drops every listing from the very second the
+    caller asked for, which is the one result the argument exists to return.
+
+    A value that is not a timestamp at all falls back to the old text compare,
+    so a caller passing something else keeps the behaviour it had.
+    """
+    try:
+        cutoff: datetime | None = datetime.fromisoformat(threshold)
+    except ValueError:
+        cutoff = None
+    if cutoff is not None and cutoff.tzinfo is None:
+        # A bare date ("2026-10-03") means the start of that day, in UTC —
+        # the same clock the engine stamps every row with.
+        cutoff = cutoff.replace(tzinfo=UTC)
+
+    def keep(job: Mapping[str, Any]) -> bool:
+        raw = str(job.get("scraped_at") or "")
+        if cutoff is None:
+            return raw >= threshold
+        try:
+            seen = datetime.fromisoformat(raw)
+        except ValueError:
+            return False
+        if seen.tzinfo is None:
+            seen = seen.replace(tzinfo=UTC)
+        return seen >= cutoff
+
+    return keep
+
+
 def _settings(ctx: Any) -> dict[str, Any]:
     """This plugin's settings, read through ``ctx.get_config`` once per call.
 
@@ -783,11 +820,10 @@ async def handle_job_list(params: dict[str, Any], *, ctx: Any = None, **kwargs: 
         return _fail(**error)
     if params.get("new_since"):
         # Filtering in the handler keeps the CLI surface small; the store
-        # already returns newest-first.
-        threshold = str(params["new_since"])
-        payload["jobs"] = [
-            job for job in payload.get("jobs", []) if str(job.get("scraped_at") or "") >= threshold
-        ]
+        # already returns newest-first, and the comparison is on instants
+        # rather than on ISO text (see _new_since_predicate).
+        keep = _new_since_predicate(str(params["new_since"]))
+        payload["jobs"] = [job for job in payload.get("jobs", []) if keep(job)]
         payload["shown"] = len(payload["jobs"])
         # The collapse happened inside the engine and cannot see this filter,
         # so `unique` has to come down with `shown` or the envelope counts rows

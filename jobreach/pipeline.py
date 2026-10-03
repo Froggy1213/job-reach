@@ -154,7 +154,13 @@ async def _run_scrapers(request: SearchRequest) -> tuple[list[JobPosting], dict[
     """Run every scraper concurrently, collecting per-board failures."""
     names = list(request.sources.scraped)
     if not names:
-        return [], {"sources": "no scrapable board selected (indeed is ingest-only)"}
+        # Every selected board is ingest-only (``scrapers.INGEST_ONLY``). Empty
+        # today, but the message has to name the actual cure: such a board is
+        # read with a real browser and pushed through ``job_ingest``.
+        return [], {
+            "sources": "no board with a scraper was selected — fetch the listings "
+                       "with a real browser and push them through job_ingest"
+        }
 
     scrapers = build_scrapers(
         names,
@@ -309,8 +315,11 @@ def _finish(
     new_jobs = [job for job in enriched if job.is_new]
 
     saved = 0
-    if new_jobs and request.save:
-        saved = repository.save_many(new_jobs)
+    # Every row is persisted — not only new ones — so the upsert's
+    # times_seen / last_seen_at / field-refresh branch actually executes.
+    # save_many returns only the count of genuinely new rows inserted.
+    if enriched and request.save:
+        saved = repository.save_many(enriched)
 
     by_platform: dict[str, dict[str, int]] = {}
     # by_platform keeps counting the rows this run found — the same thing

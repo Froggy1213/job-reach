@@ -55,6 +55,10 @@ PLUGIN_DIR = Path(__file__).resolve().parent
 SKILL_PATH = PLUGIN_DIR / "skills" / "job-search" / "SKILL.md"
 
 #: Toolset name shown in ``hermes tools`` and used for per-platform gating.
+#: This is the **only** definition: it is what ``register_tool`` is called with,
+#: and the bundled skill declares the same name in its ``requires_toolsets``
+#: frontmatter (a contract test pins the two together — a drift there makes the
+#: skill silently stop matching the tools it exists to describe).
 TOOLSET = "job_reach"
 
 #: Short trigger text shown in the plugin list (the full description lives in
@@ -291,7 +295,6 @@ async def _slash_jobs(raw_args: str) -> str:
     ``ctx`` to read settings from.
     """
     import asyncio
-    import json
 
     from .tools import _invoke
 
@@ -305,13 +308,16 @@ async def _slash_jobs(raw_args: str) -> str:
     if error:
         return f"Job search failed: {error.get('error')}\n{error.get('hint', '')}".strip()
 
-    result = json.loads(json.dumps(payload))
-    summary = result.get("summary", {})
-    jobs = result.get("jobs", [])
+    # ``payload`` came out of ``json.loads`` inside ``_invoke``, so it is already
+    # plain JSON data — no defensive copy is needed, and a round-trip through
+    # ``json.dumps`` would only add a failure mode.
+    summary = payload.get("summary") or {}
+    jobs = payload.get("jobs") or []
     if not jobs:
+        boards = (payload.get("query") or {}).get("sources") or []
         return (
             f"No listings found for {keyword or 'the default design feed'}. "
-            f"Boards checked: {', '.join(result.get('query', {}).get('sources', []))}."
+            f"Boards checked: {', '.join(boards)}."
         )
 
     lines = [
@@ -320,9 +326,12 @@ async def _slash_jobs(raw_args: str) -> str:
     ]
     for job in jobs[:10]:
         badge = "NEW " if job.get("is_new") else ""
+        # ``.get`` throughout: a slash command's handler is not wrapped by
+        # ``tools._guard``, so a missing key here would reach the user as an
+        # opaque failure instead of a digest.
         lines.append(
-            f"- {badge}[{job['title']}]({job['url']}) — {job['company']} "
-            f"({job['source_label']})"
+            f"- {badge}[{job.get('title') or 'Untitled'}]({job.get('url') or ''}) — "
+            f"{job.get('company') or 'Unknown'} ({job.get('source_label') or job.get('source_platform') or '?'})"
         )
     errors = summary.get("errors") or {}
     for board, message in errors.items():

@@ -261,21 +261,28 @@ def setup_runtime(*, with_browser: bool = True, force: bool = False) -> SetupRep
         f"(install it for Cloudflare-capable fetching: {PLAYWRIGHT_HINT.splitlines()[0]})",
     )
 
+    # uv is needed on *both* paths — it creates the venv and it installs the
+    # scraping extra into it — so it is resolved before the "venv already
+    # exists" shortcut. Checking it inside the else-branch meant a machine that
+    # still had a venv from an earlier install but no uv in PATH failed later
+    # with a bare "could not start uv" (from `uv or "uv"`) instead of the
+    # actionable message below.
     uv = uv_path()
+    if uv is None:
+        report.add(
+            "uv",
+            False,
+            "uv was not found. Install it (https://astral.sh/uv) or set "
+            "JOBREACH_UV to its path.",
+        )
+        return report
+
     target = venv_dir()
     existing = venv_python()
 
     if existing is not None and not force:
         report.add("venv", True, f"already present at {target}")
     else:
-        if uv is None:
-            report.add(
-                "uv",
-                False,
-                "uv was not found. Install it (https://astral.sh/uv) or set "
-                "JOBREACH_UV to its path.",
-            )
-            return report
         if force and target.exists():
             shutil.rmtree(target, ignore_errors=True)
         ok, detail = _setup_step(
@@ -293,7 +300,7 @@ def setup_runtime(*, with_browser: bool = True, force: bool = False) -> SetupRep
     report.venv = str(python)
 
     ok, detail = _setup_step(
-        [uv or "uv", "pip", "install", "--python", str(python), *SCRAPE_PACKAGES],
+        [uv, "pip", "install", "--python", str(python), *SCRAPE_PACKAGES],
         PIP_TIMEOUT,
     )
     if not ok:
@@ -421,6 +428,7 @@ def diagnostics() -> dict[str, Any]:
     """Describe the runtime: paths, interpreter, backends, board readiness."""
     from .config import default_db_path, find_vault
     from .scrapers import SCRAPERS, is_cli_scraper, needs_browser
+    from .store import MIN_SQLITE_VERSION
 
     python, source = resolve_interpreter()
     db = default_db_path()
@@ -475,6 +483,12 @@ def diagnostics() -> dict[str, Any]:
         "venv": str(venv_dir()) if venv_python() else None,
         "uv": uv_path(),
         "sqlite": sqlite3.sqlite_version,
+        # The store needs RETURNING (see store.MIN_SQLITE_VERSION) before it can
+        # write anything. Reporting it here is what turns "every save fails with
+        # an SQL syntax error" into a readiness finding the agent can read before
+        # the first run rather than after it.
+        "sqlite_ok": sqlite3.sqlite_version_info >= MIN_SQLITE_VERSION,
+        "sqlite_required": ".".join(str(part) for part in MIN_SQLITE_VERSION),
         "obsidian_vault": str(vault) if vault else None,
         "boards": boards,
     }

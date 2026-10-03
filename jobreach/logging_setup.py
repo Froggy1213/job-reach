@@ -54,7 +54,14 @@ def setup_logging(level: str = "WARNING") -> logging.Logger:
     handler.setFormatter(_JsonFormatter())
 
     logger = logging.getLogger(LOGGER_NAME)
-    logger.handlers.clear()
+    # ``close()`` as well as removal: a bare ``handlers.clear()`` drops our
+    # reference but leaves each handler registered in :mod:`logging`'s own
+    # module-level list, so calling this twice leaks one handler per call.
+    # ``main()`` runs on every in-process invocation, which the test suite does
+    # hundreds of times.
+    for existing in list(logger.handlers):
+        logger.removeHandler(existing)
+        existing.close()
     logger.addHandler(handler)
     logger.setLevel(getattr(logging, str(level).upper(), logging.WARNING))
     logger.propagate = False

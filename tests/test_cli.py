@@ -78,6 +78,26 @@ def test_doctor_json_reports_paths_and_backend(
     assert boards["indeed"]["ready"] is False  # …and there is no browser here
 
 
+def test_doctor_reports_an_unsupported_sqlite(
+    data_home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+):
+    """The store cannot write without ``RETURNING`` (SQLite >= 3.35).
+
+    Doctor has to say so up front: otherwise the first symptom of an old
+    libsqlite3 is every save failing with an opaque SQL syntax error.
+    """
+    monkeypatch.setattr("jobreach.scrapling.scrapling_python", lambda: (None, ""))
+    monkeypatch.setattr("jobreach.scrapers.base.probe_playwright", lambda: (False, "no playwright"))
+    monkeypatch.setattr("sqlite3.sqlite_version_info", (3, 34, 0))
+    monkeypatch.setattr("sqlite3.sqlite_version", "3.34.0")
+
+    code, out, _ = run(capsys, "doctor", "--json")
+    assert code == EXIT_OK
+    payload = json.loads(out)
+    assert payload["sqlite_ok"] is False
+    assert payload["sqlite_required"] == "3.35"
+
+
 def test_stats_on_an_empty_database(data_home: Path, capsys: pytest.CaptureFixture[str]):
     code, out, _ = run(capsys, "stats", "--json")
     assert code == EXIT_OK
@@ -248,6 +268,31 @@ def test_setup_without_uv_fails_with_a_hint(
     code, out, _ = run(capsys, "setup", "--no-browser")
     assert code == EXIT_FAILURE
     assert "uv was not found" in out
+
+
+def test_setup_without_uv_fails_even_when_a_venv_already_exists(
+    data_home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+):
+    """uv is needed for the *install* step too, not only for creating the venv.
+
+    A leftover venv from an earlier install used to short-circuit the uv check,
+    so the run sailed past "venv already present" and died later with a bare
+    "could not start uv" — instead of the actionable hint. The check now runs
+    first, so the report names uv and never claims the venv is usable.
+    """
+    monkeypatch.setattr(
+        "jobreach.runtime.scrapling_status",
+        lambda: {"ready": False, "python": None, "source": "", "version": "", "problem": ""},
+    )
+    monkeypatch.setattr("jobreach.runtime.uv_path", lambda: None)
+    monkeypatch.setattr(
+        "jobreach.runtime.venv_python", lambda: Path("/nonexistent/venv/bin/python")
+    )
+
+    code, out, _ = run(capsys, "setup", "--no-browser")
+    assert code == EXIT_FAILURE
+    assert "uv was not found" in out
+    assert "already present" not in out
 
 
 def test_setup_uses_scrapling_when_it_is_installed(

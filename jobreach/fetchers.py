@@ -36,21 +36,19 @@ from typing import Any
 
 from .errors import ConfigError, MissingDependencyError
 
+#: Chromium-on-macOS UA, owned by the HTTP client and re-exported here so the
+#: browser boards and the JSON boards present one client identity instead of two
+#: copies that can drift apart. A plausible identity avoids the crudest bot
+#: filters; the Scrapling browser generates its own, so this one is what the
+#: Playwright fallback sends.
+from .webclient import USER_AGENT as USER_AGENT
+
 #: Ceiling for one page fetch, in milliseconds. Cloudflare solving plus a JS
 #: render can legitimately take 30 s; past that the site is not answering.
 DEFAULT_TIMEOUT_MS = 90_000
 
 #: How long to let the page settle after a scroll, before extracting.
 DEFAULT_SETTLE_MS = 3_500
-
-#: Chromium-on-macOS UA. Boards serve the same markup to everyone, but a
-#: plausible identity avoids the crudest bot filters (the Scrapling browser
-#: generates its own; this one is for the Playwright fallback).
-USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/137.0.0.0 Safari/537.36"
-)
 
 #: Fetch modes, most capable first. A scraper may name a chain, so a board that
 #: needs solving a challenge can still fall back to a plainer browser.
@@ -95,6 +93,18 @@ def click(selector: str, *, optional: bool = False, settle_ms: int = 0) -> dict[
     element is not an error, because that is what the last page looks like.
     """
     return {"click": selector, "optional": bool(optional), "wait_ms": int(settle_ms)}
+
+
+def goto(url: str, *, wait_until: str = "domcontentloaded") -> dict[str, Any]:
+    """Navigate to *url* within the existing browser session.
+
+    A board whose next result page is addressable by URL (Indeed's ``start=``)
+    can then be paged by navigating in the same browser session rather than by
+    clicking the site's pager. That removes the dependency on the pager's markup
+    surviving a redesign, and it lets one session cover several pages instead of
+    one browser launch per page.
+    """
+    return {"goto": str(url), "wait_until": str(wait_until)}
 
 
 def wait_selector(selector: str, *, state: str = "attached", timeout_ms: int | None = None) -> dict[str, Any]:

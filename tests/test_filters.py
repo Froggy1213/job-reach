@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from jobreach.errors import FilterError
@@ -350,3 +352,83 @@ def test_builtin_profiles_are_listed():
     assert {"designer", "frontend", "engineering", "product", "any"} <= set(
         available_profiles()
     )
+
+
+def test_llm_batch_with_one_invalid_idx_does_not_fall_back_entire_batch(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A non-numeric idx skips only that item without failing over the whole batch."""
+    _clear_llm_env(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+
+    def fake_completion(**_kwargs):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "classifications": [
+                                    {"idx": "one", "keep": True, "score": 0.9, "reason": "skipped item"},
+                                    {"idx": 1, "keep": True, "score": 0.95, "reason": "great design fit"},
+                                ]
+                            }
+                        )
+                    }
+                }
+            ],
+            "usage": {"total_tokens": 20},
+        }
+
+    monkeypatch.setattr("jobreach.filters._chat_completion", fake_completion)
+    jobs = [
+        {"title": "UI Designer", "description": "Design user interfaces."},
+        {"title": "Product Designer", "description": "Design digital products."},
+    ]
+    result = filter_jobs(jobs, profile="designer", mode="llm")
+
+    # The batch must not be counted as a fallback
+    assert result.stats["fallbacks"] == 0
+    # The valid item's verdict (reason and score) is used for its job
+    job_one = next(job for job in result.kept if job["title"] == "Product Designer")
+    assert job_one["filter_reason"] == "great design fit"
+    assert job_one["filter_score"] == 0.95
+
+
+def test_llm_accepts_classifications_wrapped_under_alternative_key(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """When a model wraps results under e.g. 'jobs', the array is still found."""
+    _clear_llm_env(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+
+    def fake_completion(**_kwargs):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "jobs": [
+                                    {
+                                        "idx": 0,
+                                        "keep": True,
+                                        "score": 0.88,
+                                        "reason": "strong product fit",
+                                    }
+                                ]
+                            }
+                        )
+                    }
+                }
+            ],
+            "usage": {"total_tokens": 15},
+        }
+
+    monkeypatch.setattr("jobreach.filters._chat_completion", fake_completion)
+    result = filter_jobs([{"title": "Product Designer"}], profile="designer", mode="llm")
+
+    assert result.stats["fallbacks"] == 0
+    assert len(result.kept) == 1
+    assert result.kept[0]["filter_reason"] == "strong product fit"
+    assert result.kept[0]["filter_score"] == 0.88

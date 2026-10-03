@@ -34,6 +34,7 @@ from .config import hermes_home, plugin_dir
 from .errors import ConfigError
 from .logging_setup import get_logger
 from .platforms import is_windows
+from .proc import run_captured
 from .runtime import engine_argv
 
 logger = get_logger("install")
@@ -46,6 +47,10 @@ SKILL_NAME = "job-reach"
 BUNDLED_SKILL = Path("skills") / "job-search"
 
 MONITOR_SCRIPT_NAME = "job-reach-monitor.py"
+
+#: Ceiling for creating a cron job through hermes CLI. Bounded so a stuck Hermes
+#: cannot wedge the tool call until the outer bridge timeout.
+CRON_CREATE_TIMEOUT = 60.0
 
 #: The generated cron monitor. Kept as a template (not a bash heredoc) so the
 #: same file works on every platform Hermes supports — see
@@ -169,7 +174,7 @@ def install_monitor_script(extra_args: list[str] | None = None) -> Path:
     # source (``PosixPath('…')`` raises NameError in the generated script).
     body = MONITOR_SCRIPT_TEMPLATE.format(plugin=str(plugin), python=str(python), args=args)
     target.write_text(body, encoding="utf-8")
-    if os.name != "nt":  # the executable bit is meaningless on Windows
+    if not is_windows():  # the executable bit is meaningless on Windows
         target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return target
 
@@ -230,7 +235,14 @@ def install_cron(
         if deliver:
             command += ["--deliver", deliver]
 
-        result = subprocess.run(command, capture_output=True, text=True)
+        try:
+            result = run_captured(command, timeout=CRON_CREATE_TIMEOUT)
+        except subprocess.TimeoutExpired as exc:
+            # Treat a timeout as a failure of this form so a stuck Hermes child
+            # never wedges the tool call, and proceed to the fallback form.
+            err = (exc.stderr or "").strip() or f"hermes cron create timed out after {int(CRON_CREATE_TIMEOUT)}s"
+            result = subprocess.CompletedProcess(command, 124, exc.output or "", err)
+            continue
         if result.returncode == 0:
             break
 

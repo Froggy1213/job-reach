@@ -62,7 +62,7 @@ def emit(payload: dict[str, Any]) -> None:
 def run_steps(page: Any, steps: list[dict[str, Any]], results: dict[str, Any]) -> None:
     """Execute the step list against a live page.
 
-    Order inside one step: scroll → click → wait_load → wait_selector →
+    Order inside one step: scroll → click → goto → wait_load → wait_selector →
     evaluate → capture, with ``wait_ms`` meaning "settle". For a scroll step it
     waits after *each* pass (that is how lazy content is triggered); for every
     other step — including a bare ``{"wait_ms": …}`` — it waits once at the end.
@@ -87,6 +87,11 @@ def run_steps(page: Any, steps: list[dict[str, Any]], results: dict[str, Any]) -
                 if step.get("optional") and not page.query_selector(str(step["click"])):
                     continue
                 page.click(str(step["click"]))
+            if "goto" in step:
+                page.goto(
+                    str(step["goto"]),
+                    wait_until=str(step.get("wait_until") or "domcontentloaded"),
+                )
             if "wait_load" in step:
                 page.wait_for_load_state(str(step["wait_load"]))
             if "wait_selector" in step:

@@ -16,6 +16,7 @@ caller cannot end up in different folders.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
@@ -86,11 +87,12 @@ def render_note(result: Mapping[str, Any], *, generated_at: datetime | None = No
     location = query.get("location") or "any"
     boards = _boards_present(jobs, summary)
 
+    # JSON strings double as valid YAML scalars, safely quoting and escaping quotes/backslashes.
     lines: list[str] = [
         "---",
         f"date: {moment.strftime('%Y-%m-%dT%H:%M')}",
-        f'query: "{keyword}"',
-        f'location: "{location}"',
+        f"query: {json.dumps(keyword, ensure_ascii=False)}",
+        f"location: {json.dumps(location, ensure_ascii=False)}",
         f"sources: [{', '.join(boards)}]",
         f"total: {summary.get('total', len(jobs))}",
         f"new: {summary.get('new', 0)}",
@@ -117,10 +119,10 @@ def render_note(result: Mapping[str, Any], *, generated_at: datetime | None = No
         lines.extend(["| # | Title | Company | Location |", "|---|-------|---------|----------|"])
         for index, job in enumerate(rows, start=1):
             badge = "🏷️ NEW " if job.get("is_new") else ""
-            title = _escape_pipes(str(job.get("title") or "Untitled"))
+            title = _clean_cell(str(job.get("title") or "Untitled"))
             url = str(job.get("url") or "")
-            company = _escape_pipes(str(job.get("company") or "Unknown"))
-            where = _escape_pipes(str(job.get("location") or ""))
+            company = _clean_cell(str(job.get("company") or "Unknown"))
+            where = _clean_cell(str(job.get("location") or ""))
             lines.append(f"| {index} | {badge}[{title}]({url}) | {company} | {where} |")
         lines.append("")
 
@@ -186,6 +188,11 @@ _LABELS: dict[str, str] = {str(platform): label for platform, label in PLATFORM_
 def _label(board: str) -> str:
     """Display name for a board id; an unknown id falls back to the raw string."""
     return _LABELS.get(board, board)
+
+
+def _clean_cell(text: str) -> str:
+    """Collapse whitespace runs (newlines) to single spaces and escape table pipes."""
+    return _escape_pipes(" ".join(text.split()))
 
 
 def _escape_pipes(text: str) -> str:

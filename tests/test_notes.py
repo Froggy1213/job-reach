@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+import yaml
 
 from jobreach.errors import ConfigError
 from jobreach.notes import note_path, render_note, slugify, write_note
@@ -134,3 +135,50 @@ def job_searches_subfolder() -> str:
     from jobreach.config import NOTE_SUBFOLDER
 
     return NOTE_SUBFOLDER
+
+
+def test_frontmatter_escapes_quotes_and_backslashes():
+    keyword = 'say "hi" \\ now'
+    location = 'tokyo "metro" \\ central'
+    note = render_note(
+        {
+            "query": {"keyword": keyword, "location": location},
+            "summary": {"total": 0, "new": 0},
+            "jobs": [],
+        },
+        generated_at=MOMENT,
+    )
+    parts = note.split("---")
+    assert len(parts) >= 3
+    frontmatter = yaml.safe_load(parts[1])
+    assert frontmatter["query"] == keyword
+    assert frontmatter["location"] == location
+
+
+def test_listing_title_with_newlines_and_pipes_renders_single_row():
+    title = "Senior Frontend\nDeveloper | Remote"
+    note = render_note(
+        {
+            "query": {"keyword": "frontend", "location": "tokyo"},
+            "summary": {"total": 1, "new": 0},
+            "jobs": [
+                {
+                    "title": title,
+                    "company": "Acme\nCorp",
+                    "url": "https://example.com/job/1",
+                    "location": "Tokyo\nRemote",
+                    "source_platform": "wantedly",
+                    "is_new": False,
+                }
+            ],
+        },
+        generated_at=MOMENT,
+    )
+    # The listing must produce exactly one table row line with escaped pipe and no inner newline
+    row_lines = [line for line in note.splitlines() if "[Senior Frontend Developer" in line]
+    assert len(row_lines) == 1
+    row = row_lines[0]
+    assert row.startswith("| 1 |")
+    assert "Senior Frontend Developer \\| Remote" in row
+    assert "Acme Corp" in row
+    assert "Tokyo Remote" in row
