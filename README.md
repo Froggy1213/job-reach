@@ -7,240 +7,31 @@ plugin: seven LLM-callable tools, one skill, and scheduled monitoring through
 
 ---
 
-## From manual research to agent support
+## Design constraints
 
-The first version of this project was a **manual research tool**. You opened
-Telegram, typed `/jobs wantedly`, and the bot fetched listings and sent them
-back. The research stayed yours: you chose what to search, you read the cards,
-you remembered what you had already seen. An agent could only reach it through a
-shim — `hermes.py` hard-coded an absolute project path — driven by a shell
-wrapper that had to strip `VIRTUAL_ENV` first, because Hermes' Python and the
-project's Python fought over `pydantic_core`.
+The consumer of every interface here is a **model**, not a person. That one fact
+is what makes these rules non-negotiable, and it is why the code looks the way it
+does:
 
-This version makes the opposite bet: **the agent is the operator**, and the
-repository's job is to be good at being operated. That changes what "good" means
-at every layer:
-
-- **The interface is read by a model, not typed by a person.** Each tool schema
-  has to carry the knowledge needed to choose correctly: which board answers
-  which query, that Mynavi is new-grad design only and ignores location, that
-  Indeed is the widest market but the only board that can be bot-blocked, that a
-  scrape takes seconds to a minute and must not be retried in a loop. That prose
-  is the product, not decoration.
+- **The interface is read by a model.** Each tool schema has to carry the
+  knowledge needed to choose correctly: which board answers which query, that
+  Mynavi is new-grad design only and ignores location, that Indeed is the widest
+  market but the only board that can be bot-blocked, that a scrape takes seconds
+  to a minute and must not be retried in a loop. That prose is the product, not
+  decoration.
 - **Output is a contract.** Every tool returns a stable JSON envelope
   (`summary`, `jobs[]`, `is_new`); `--json` writes nothing but JSON to stdout
   while logs go to stderr; `is_new` makes "what changed?" a field instead of a
   judgement call.
 - **Failures are instructions.** A failed board returns
-  `{"success": false, "error": …, "hint": …}` where the hint is the exact
-  command that fixes it, and one broken board never discards the others.
-  Handlers never raise — a stack trace is useless to a model.
-- **The tool may not break its host.** The engine imports nothing outside the
-  standard library, so it loads cleanly into Hermes' own runtime (Python 3.14)
-  and can never take down the agent it serves. Browsers — the one heavy
-  dependency — live outside, in an interpreter the plugin only *drives*.
-- **Knowledge lives in the repository, not in someone's head.** A skill whose
-  `description` is its trigger, plus `references/` for procedures too long for a
-  tool description — the Indeed browser recipe, the board-by-board caveats.
-- **Scheduling belongs to the host.** `job_cron` creates a real `hermes cron`
-  job in monitor mode, so the boards are polled cheaply and the model only wakes
-  when the output actually changed. Delivery goes through the gateway you
-  already use, to whichever chat platform you already use.
+  `{"success": false, "error": ..., "hint": ...}` where the hint is the exact
+  command that fixes it, and one broken board never discards the others. Handlers
+  never raise — a stack trace is useless to a model.
+- **Knowledge lives in the repository.** A skill whose `description` is its
+  trigger, plus `references/` for procedures too long for a tool description —
+  the Indeed browser recipe, the board-by-board caveats.
 
-The boards, the scrapers, the hard-won markup workarounds and the
-"new since last run" semantics are unchanged — they were the valuable part. What
-changed is who they are for. The bot is gone; the research is now something you
-ask for rather than something you perform.
-
----
-
-## What changed
-
-| Removed | Replaced by |
-|---------|-------------|
-| `aiogram` Telegram bot (`bot/`, `main.py`) | Hermes gateway — the agent answers wherever you already talk to it |
-| APScheduler periodic scrape | `hermes cron` in monitor mode (`job_cron`) |
-| `services/notifier.py`, subscribers table | `deliver` targets on the cron job |
-| `config/settings.py` (required `BOT_TOKEN`) | `jobreach/config.py` — zero required configuration |
-| `hermes.py` shim with a hard-coded project path | `tools.py` + `jobreach/runtime.py`, path-agnostic |
-| `search_cli.py` + a bash wrapper in `~/.hermes/skills/` | `jobreach/cli.py`, and a skill that ships with the plugin |
-| SQLAlchemy + aiosqlite + pydantic + httpx | `sqlite3`, dataclasses, `urllib` |
-| Docker / Compose deployment | `hermes plugins install` |
-
----
-
-## What changed in 2.4
-
-**The plugin's own advertised settings now do something, and every failure the
-model sees is a sentence it can act on.** This release came out of auditing the
-plugin against the official [Hermes plugin developer
-guide](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins); the
-reasoning and the before/after evidence are in
-`docs/hermes-plugin-compliance.md`.
-
-- **Settings are read, not just declared.** `plugin.yaml` had advertised
-  `default_keyword`, `default_sources` and `note_subfolder` for two releases
-  while no code path read them — the setting appeared in `hermes plugins list`,
-  the user set it, and nothing happened. They are now read through
-  `ctx.get_config` on every call and forwarded to the engine subprocess through
-  the new `jobreach/settings.py` (`JOBREACH_SETTING_*`), so a `config.yaml` edit
-  takes effect on the next tool call with no restart. `max_results` joins them.
-  Precedence is fixed and tested: **explicit tool argument → configured setting →
-  built-in default**, and a blank or unset key means "use the default", never
-  "override with nothing".
-- **The cron job no longer freezes the board list.** `install-cron` used to bake
-  `--source wantedly,linkedin` into the generated monitor script, so a scheduled
-  job installed before a `default_sources` change kept polling the old boards
-  forever. It now omits `--source` unless the caller named boards, and each
-  scheduled run resolves the setting at run time.
-- **Handlers cannot raise.** `_invoke` caught three exception types and let the
-  rest escape into Hermes' tool loop. It now catches everything and answers with
-  `{"success": false, "error": …, "hint": …}`, rejects a non-object JSON payload,
-  and coerces `limit`/`offset`/`recent_runs` before they become CLI flags.
-- **Errors became instructions.** A bad `limit` used to return an argparse
-  `usage:` dump, and a CLI crash returned a full traceback complete with the
-  plugin's file paths — while the `hint` blamed Playwright for everything. The
-  messages are now typed (`limit must be an integer, got 'many'`), a traceback
-  collapses to `the engine crashed: TypeError: …`, and the hint matches the
-  actual failure.
-- **`job_status` can say what actually ran.** The plugin subscribes to
-  `post_tool_call` and journals its own calls (`{tool, at, ok, detail}`, newest
-  first, last 20, lock-guarded because the hook fires concurrently) in
-  `ctx.state`; `job_status` returns them as `recent_tool_calls`. Tool calls from
-  other plugins are ignored, and a broken state facade degrades to "not
-  recorded" rather than raising.
-- **The test suite guards the guide's rules.** Contract tests now pin the
-  manifest ↔ registration relation for hooks as well as tools, that every
-  `config_schema` key is actually read, that every schema property (including
-  nested `items.properties`) is described for the model, and that the version
-  declarations in `plugin.yaml`, `jobreach/__init__.py`, `pyproject.toml` and
-  `SKILL.md` never drift apart. `tests/test_docs_examples.py` loads a frozen copy
-  of the plugin from an isolated `HERMES_HOME`, and `tools_acceptance.py` drives
-  the real subprocess bridge end to end. 448 tests, from 313.
-
----
-
-## What changed in 2.5
-
-**Relevance filtering can now be the default, because the cheap answer used to
-be the noisy one.** A bare `job_search` over all seven boards returned 140
-listings — around 90 KB of JSON, roughly a quarter of a context window — of
-which about nine tenths was noise (recruiter rows from Daijob, postings
-unrelated to design from LinkedIn). Re-run with `validation="local"` and
-`profile="designer"` the sweep came back an order of magnitude smaller, 9.5 KB
-of listings the user wanted. The filter was always there; only an explicit
-argument could switch it on. (Those two figures are separate sweeps; measured
-back to back on the four browser-free boards, `off` returned 57 cards / 34.6 KB
-and `local` 15 cards / 10.0 KB.)
-
-- **`default_validation` and `default_profile` are two new settings.** They
-  supply the value the engine's `--validate` and `--profile` flags fall back to,
-  so a bare `jobreach search` — and the `job_search` call a model makes with no
-  relevance arguments — runs the configured filter. `default_validation` is
-  `off` (every match, which is what it has always been) or `local`/`llm`;
-  `default_profile` is `designer` (the default), `frontend`, `engineering`,
-  `product` or `any`. Precedence is unchanged: **explicit argument → configured
-  setting → built-in default**.
-- **A scheduled monitor keeps a default of its own.** `monitor` filters with
-  `local` unless the user configured something else, because an unattended run
-  that pushed every raw listing into a notification would be worse than no
-  notification. A configured `default_validation` still wins.
-- **A mistyped value is a warning, not a crash.** An unknown
-  `default_validation` or `default_profile` is logged on stderr and the built-in
-  default is used, so a typo in `config.yaml` cannot stop a cron monitor — or a
-  search — from running. A blank value still means "plugin default". Every new
-  behaviour has its own test; the suite is 528 tests, green.
-- **Content duplicates collapse before a caller ever counts them.** An employer
-  posting one vacancy as ~30 near-identical cards (routine on Wantedly) read as
-  30 vacancies. A run now folds rows that share a company, title and board into
-  one representative carrying `duplicates` and `duplicate_urls`, and `summary`
-  reports `unique` and `hidden_duplicates` beside the unchanged raw `total`, so
-  a count of "how many jobs" no longer depends on the same job being posted 30
-  times. `dedupe: false` (`--no-dedupe`) returns every card when the individual
-  URLs are what matters.
-- **`detail: true` returns the body text.** The description was scraped, stored
-  and used by the relevance filter, but it never reached the caller — so the
-  only evidence for judging a listing was its title, which is useless on boards
-  that synthesise titles from an occupation code. It is opt-in because it costs
-  context: a page of listings is a page of bodies.
-
----
-
-## What changed in 2.3
-
-**The plugin is portable to any Hermes, including on Windows** — and the README
-now says exactly what a host needs (see "Requirements & platform support"
-above). The work was not documentation, it was removing the assumptions:
-
-- `jobreach/platforms.py` collects every OS difference: virtualenv layout
-  (`bin/python` vs `Scripts\python.exe`), `uv` discovery, process-tree teardown
-  (`taskkill /F /T` on Windows), and how a child is isolated from console
-  signals. Each takes an explicit platform argument, so both layouts are
-  unit-tested from one machine.
-- The cron monitor is generated as **Python** instead of bash. Hermes runs
-  `.sh` scripts through bash, which a stock Windows install does not have; a
-  `.py` script runs on all three platforms — verified here by generating it,
-  running it, and checking the digest it printed.
-- `plugin.yaml` declares `platforms: [macos, linux, windows]` and
-  `python_dependencies: []` explicitly, and a new test imports the whole engine
-  in a clean interpreter and asserts that it adds **zero** non-stdlib modules.
-- Printed commands are quoted for the shell the user is actually in.
-
----
-
-## What changed in 2.2
-
-Three more boards, chosen so the *cheap* half of the market is covered without a
-browser at all:
-
-- **Green** (`green`) — IT/Web industry postings. The site is a Next.js app, but
-  it serialises its results into the page's `__NEXT_DATA__` payload, so the
-  whole search comes back as typed JSON: title, company, area, **salary**,
-  description, publication date. ~1 s per run.
-- **Daijob** (`daijob`) — bilingual and foreign-capital employers. Plain
-  server-rendered HTML, read with the standard library
-  (`jobreach/htmlextract.py`): card split by `article.job-card`, fields from the
-  card's `<dt>/<dd>` pairs (勤務地, 年収, 仕事内容). ~2 s per run.
-- **Japan Dev** (`japandev`) — English-speaking tech jobs. Server-rendered too,
-  but its search box filters **client-side** (verified: three different queries
-  returned the identical set of 60 listings), so the plugin downloads the page
-  and applies its own title filter. ~1 s per run.
-
-With Wantedly that makes **four of seven boards browser-free**, which matters on
-a machine where the browser stack is missing: they keep working. `doctor` now
-reports each board's backend (`http`, `scrapling`, `cli`), and `-s all` fans out
-across all seven.
-
-Also: `htmlextract.py` (a small, tested stdlib HTML reader) and
-source aliases (`green-japan`, `japan-dev`, `mynavi`) on the command line.
-
----
-
-## What changed in 2.1
-
-Three upgrades, all driven by capabilities that appeared after 2.0 was written:
-
-1. **Wantedly is read over its JSON API.** The HTML search page turns out to
-   *discard* query parameters it no longer recognises and redirect to the
-   generic feed — so a keyword search through the page silently returned
-   unrelated listings, and because the old scraper declared
-   `url_encodes_keyword = True`, the client-side filter did not catch them
-   either. `/api/v1/projects` honours `q=` for real, returns typed fields
-   (company, address, description, publication date) and costs ~4 s instead of
-   ~40 s. This board now needs **no browser at all** (`needs_browser = False`).
-2. **Indeed Japan is scraped.** It was ingest-only because Cloudflare refused
-   headless clients; a stealth browser (Scrapling's patched Chromium) gets
-   through — measured 200 OK, 16 cards, ~7 s, headless, repeatable. The
-   `job_ingest` workflow stays as the documented fallback for blocked runs.
-3. **Fetching is a backend choice, not a dependency.** Scrapers describe their
-   page work as a *step list* (`wait`, `scroll`, `evaluate`, `click`, …) and the
-   plugin runs it on whichever backend exists: Scrapling (preferred — usually
-   already installed, solves Cloudflare, downloads nothing) or the plugin's own
-   Playwright venv (the 150 MB fallback). `job_setup` now adopts Scrapling when
-   it finds it.
-
-Also: `posted_at` is carried through the store and the JSON envelope, and
-`doctor` reports the backend board by board.
+See [Architecture](#architecture) for how those shape the engine itself.
 
 ---
 
@@ -438,12 +229,12 @@ from `sqlite3`, validation is explicit dataclass checks, HTTP comes from
 
 **2. A browser is a capability we look for, never a dependency we declare.**
 Scrapers describe their page work as a step list (`wait`, `scroll`, `evaluate`,
-`click`, `wait_selector`, `capture`) and hand it to a backend: Scrapling, run as
-a subprocess in whatever interpreter has it, or Playwright inside the plugin's
-own venv. Both execute the same vocabulary, so a board cannot work on one and
-silently break on the other. The interpreter is resolved as
-`$JOBREACH_PYTHON` → the plugin venv → `sys.executable`, so the read-only tools
-work before any setup has run.
+`click`, `goto`, `wait_load`, `wait_selector`, `capture`) and hand it to a
+backend: Scrapling, run as a subprocess in whatever interpreter has it, or
+Playwright inside the plugin's own venv. Both execute the same vocabulary, so a
+board cannot work on one and silently break on the other. The interpreter is
+resolved as `$JOBREACH_PYTHON` → the plugin venv → `sys.executable`, so the
+read-only tools work before any setup has run.
 
 **3. Messaging and scheduling belong to Hermes.** `job_cron` creates a real
 `hermes cron` job in **monitor mode**: the boards are polled cheaply every tick
@@ -576,23 +367,6 @@ hermes job-reach install-skill     # refresh the auto-discoverable skill copy
 ```
 
 Restart Hermes afterwards — plugins are imported when a session starts.
-
----
-
-## What was kept
-
-The pieces that were already right, and that this rewrite deliberately carried
-over unchanged in substance:
-
-- the **strategy pattern** for boards — one class per site, one registry entry;
-- the **repository port** — the pipeline never sees SQL;
-- the **hard-won board knowledge**, now encoded in selectors, URL schemes and
-  comments rather than in prose: Wantedly's real search API, Indeed's `jk` keys
-  and `[data-testid]` slots, Mynavi's occupation codes and card text;
-- the **local/LLM relevance profiles**, and the rule that a failing LLM batch
-  degrades to heuristics instead of losing a scrape;
-- the **browser-ingest fallback** for Indeed — the one board where the honest
-  answer, when automation is blocked, is still "a real browser or nothing".
 
 ---
 
