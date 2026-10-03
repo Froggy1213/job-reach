@@ -522,6 +522,9 @@ def _success_detail(tool_name: str, payload: Mapping[str, Any]) -> str:
     if tool_name == "job_setup":
         return _str_arg(payload, "skill") or "runtime ready"
     if tool_name == "job_cron":
+        cron = payload.get("cron")
+        if isinstance(cron, Mapping) and cron.get("reused"):
+            return "cron reused"
         return "cron created"
     # job_search / job_ingest / job_list all wrap the engine envelope in "result".
     result = payload.get("result")
@@ -919,6 +922,7 @@ async def handle_job_setup(params: dict[str, Any], *, ctx: Any = None, **kwargs:
     )
 
     skill_path = None
+    skill_warning = None
     if params.get("install_skill", True):
         skill_payload, skill_error = await asyncio.to_thread(
             _invoke, ["install-skill", "--json"], timeout=60.0, settings=settings
@@ -928,10 +932,14 @@ async def handle_job_setup(params: dict[str, Any], *, ctx: Any = None, **kwargs:
             payload["skill_error"] = skill_error["error"]
         elif skill_payload:
             skill_path = skill_payload.get("skill")
+            skill_warning = skill_payload.get("warning")
 
     if error and not skill_path:
         return _fail(**error)
-    return _ok({"setup": payload, "skill": skill_path})
+    result_payload: dict[str, Any] = {"setup": payload, "skill": skill_path}
+    if skill_warning:
+        result_payload["skill_warning"] = skill_warning
+    return _ok(result_payload)
 
 
 @_guard
@@ -959,7 +967,7 @@ async def handle_job_cron(params: dict[str, Any], *, ctx: Any = None, **kwargs: 
     )
     if error:
         return _fail(**error)
-    if not payload.get("created"):
+    if not payload.get("created") and not payload.get("reused"):
         return _fail(
             payload.get("message") or "the cron job was not created",
             hint="Run the printed command manually: " + str(payload.get("command", "")),

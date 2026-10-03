@@ -22,6 +22,7 @@ Two small jobs, both about closing the gap between "a plugin is installed" and
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
@@ -73,19 +74,70 @@ import sys
 PLUGIN_DIR = {plugin!r}
 ENGINE = {python!r}
 ARGS = {args!r}
+JOB_NAME = {job_name!r}
+
+#: What to tell a user whose monitor script can no longer run. `hermes cron
+#: remove` takes the job **id** (not the name), which `hermes cron list` prints.
+REMEDY = (
+    "re-run `jobreach install-cron` to regenerate this script, or remove the job "
+    "`" + JOB_NAME + "` (find its id with `hermes cron list`, then `hermes cron remove <id>`)"
+)
 
 
 def main() -> int:
+    if not os.path.exists(ENGINE):
+        sys.stderr.write(
+            "job-reach monitor: engine interpreter not found at " + str(ENGINE) + "; " + REMEDY + "\\n"
+        )
+        return 1
+
+    # Preference for the installed copy over the baked one is deliberate:
+    # Hermes' tools run the installed snapshot ($HERMES_HOME/plugins/job-reach),
+    # so the cron monitor must run the same code the agent does — one update
+    # path (rsync), not two truths (today the repo was baked in while the tools
+    # used the snapshot).
+    candidates = []
+    env_dir = os.environ.get("JOBREACH_PLUGIN_DIR")
+    if env_dir:
+        candidates.append(env_dir)
+
+    hermes_home = os.environ.get("HERMES_HOME")
+    if hermes_home:
+        candidates.append(os.path.join(hermes_home, "plugins", "job-reach"))
+    else:
+        candidates.append(os.path.expanduser("~/.hermes/plugins/job-reach"))
+
+    if PLUGIN_DIR not in candidates:
+        candidates.append(PLUGIN_DIR)
+
+    plugin_dir = None
+    for candidate in candidates:
+        if candidate and os.path.exists(os.path.join(candidate, "jobreach", "__main__.py")):
+            plugin_dir = candidate
+            break
+
+    if not plugin_dir:
+        tried = ", ".join(candidates)
+        sys.stderr.write(
+            "job-reach monitor: plugin directory not found (tried: " + tried + "); " + REMEDY + "\\n"
+        )
+        return 1
+
     env = dict(os.environ)
-    env["PYTHONPATH"] = PLUGIN_DIR
+    env["PYTHONPATH"] = plugin_dir
     env.pop("VIRTUAL_ENV", None)
-    completed = subprocess.run(
-        [ENGINE, "-m", "jobreach", "monitor", *ARGS],
-        cwd=PLUGIN_DIR,
-        env=env,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        completed = subprocess.run(
+            [ENGINE, "-m", "jobreach", "monitor", *ARGS],
+            cwd=plugin_dir,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        sys.stderr.write("job-reach monitor: failed to run engine: " + str(exc) + "\\n")
+        return 1
+
     sys.stdout.write(completed.stdout or "")
     sys.stderr.write(completed.stderr or "")
     return completed.returncode
@@ -126,6 +178,97 @@ def scripts_root() -> Path:
     return root
 
 
+def _parse_disabled_skills(content: str) -> list[str]:
+    """Parse skills.disabled list from config.yaml text without third-party YAML parser."""
+    lines = content.splitlines()
+    in_skills = False
+    in_disabled_block = False
+    disabled_indent = 0
+    disabled_skills: list[str] = []
+
+    for raw_line in lines:
+        line_no_comment = raw_line.split("#", 1)[0].rstrip()
+        stripped = line_no_comment.strip()
+        if not stripped:
+            continue
+
+        indent = len(line_no_comment) - len(line_no_comment.lstrip())
+
+        if indent == 0:
+            if stripped == "skills:" or stripped.startswith("skills:"):
+                in_skills = True
+                in_disabled_block = False
+                continue
+            else:
+                if in_skills:
+                    break
+                continue
+
+        if not in_skills:
+            continue
+
+        if in_disabled_block:
+            if indent > disabled_indent and stripped.startswith("-"):
+                item = stripped[1:].strip().strip("\"'")
+                if item:
+                    disabled_skills.append(item)
+                continue
+            else:
+                in_disabled_block = False
+
+        if stripped.startswith("disabled:"):
+            rest = stripped[len("disabled:"):].strip()
+            if rest.startswith("[") and rest.endswith("]"):
+                items_str = rest[1:-1].strip()
+                if items_str:
+                    for part in items_str.split(","):
+                        part_clean = part.strip().strip("\"'")
+                        if part_clean:
+                            disabled_skills.append(part_clean)
+                in_disabled_block = False
+            elif not rest:
+                in_disabled_block = True
+                disabled_indent = indent
+            else:
+                in_disabled_block = False
+
+    return disabled_skills
+
+
+def disabled_skill_warning(skill_name: str = SKILL_NAME) -> str | None:
+    """Say so when Hermes has this skill switched off in ``config.yaml``.
+
+    ``install_skill`` copies ``SKILL.md`` onto disk, and Hermes then ignores it
+    when the name sits under ``skills.disabled``: the copy succeeds, the tool
+    reports success, and the skill never triggers. Nothing else can notice that,
+    so this is where it gets said.
+
+    Both the directory-derived name (``job-reach``) and the skill's own
+    frontmatter name (``job-search``) are matched, because ``skills config``
+    lists whichever one Hermes keys on.
+
+    Returns ``None`` — "say nothing" — when ``config.yaml`` is missing or
+    unreadable, and when its shape is not one this stdlib-only scan recognises.
+    Guessing wrong here would put a permanent false warning in the install path.
+    """
+    config_path = hermes_home() / "config.yaml"
+    try:
+        content = config_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.debug("could not read config", extra={"path": str(config_path), "error": str(exc)})
+        return None
+
+    targets = {skill_name, SKILL_NAME, "job-search"}
+    for item in _parse_disabled_skills(content):
+        if item in targets:
+            return (
+                f"Skill {item!r} is listed under `skills.disabled` in {config_path}, so "
+                "Hermes will not load or trigger it. Remove it from `skills.disabled` "
+                "under `skills:` in config.yaml, or change it with `hermes skills config`."
+            )
+    return None
+
+
 def install_skill(*, force: bool = True) -> Path:
     """Copy the bundled skill into Hermes' skills tree. Returns the SKILL.md path."""
     source_dir = plugin_dir() / BUNDLED_SKILL
@@ -151,7 +294,11 @@ def install_skill(*, force: bool = True) -> Path:
     return target_dir / "SKILL.md"
 
 
-def install_monitor_script(extra_args: list[str] | None = None) -> Path:
+def install_monitor_script(
+    extra_args: list[str] | None = None,
+    *,
+    job_name: str = "job-reach-monitor",
+) -> Path:
     """Write the cron monitor script into Hermes' scripts directory.
 
     The script is **Python, not bash**, and that is a portability decision:
@@ -172,11 +319,40 @@ def install_monitor_script(extra_args: list[str] | None = None) -> Path:
 
     # str(), not the Path objects themselves: repr() of a Path is not Python
     # source (``PosixPath('…')`` raises NameError in the generated script).
-    body = MONITOR_SCRIPT_TEMPLATE.format(plugin=str(plugin), python=str(python), args=args)
+    body = MONITOR_SCRIPT_TEMPLATE.format(
+        plugin=str(plugin),
+        python=str(python),
+        args=args,
+        job_name=str(job_name),
+    )
     target.write_text(body, encoding="utf-8")
     if not is_windows():  # the executable bit is meaningless on Windows
         target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return target
+
+
+def _find_existing_cron_job(name: str) -> dict[str, Any] | None:
+    """Read $HERMES_HOME/cron/jobs.json and look for a job with matching name."""
+    jobs_file = hermes_home() / "cron" / "jobs.json"
+    if not jobs_file.exists():
+        return None
+    try:
+        content = jobs_file.read_text(encoding="utf-8")
+        data = json.loads(content)
+        if not isinstance(data, dict):
+            logger.debug("jobs.json is not an object: %s", jobs_file)
+            return None
+        jobs = data.get("jobs")
+        if not isinstance(jobs, list):
+            logger.debug("jobs.json 'jobs' is not a list: %s", jobs_file)
+            return None
+        for job in jobs:
+            if isinstance(job, dict) and job.get("name") == name:
+                return job
+    except Exception as exc:
+        logger.debug("Could not read cron jobs from %s: %s", jobs_file, exc)
+        return None
+    return None
 
 
 def install_cron(
@@ -212,7 +388,79 @@ def install_cron(
     monitor_args += ["--location", location]
     if sources:
         monitor_args += ["--source", sources]
-    monitor = install_monitor_script(monitor_args)
+    monitor = install_monitor_script(monitor_args, job_name=name)
+
+    existing_job = _find_existing_cron_job(name)
+    if existing_job is not None:
+        existing_id = existing_job.get("id")
+        existing_info: dict[str, Any] = {}
+        for key in ("schedule", "monitor_script", "workdir", "enabled", "deliver"):
+            if key in existing_job and existing_job[key] is not None:
+                existing_info[key] = existing_job[key]
+
+        existing_sched = existing_job.get("schedule")
+        if isinstance(existing_sched, dict):
+            existing_expr = existing_sched.get("expr")
+        elif isinstance(existing_sched, str):
+            existing_expr = existing_sched
+        else:
+            existing_expr = None
+
+        existing_monitor = existing_job.get("monitor_script")
+        existing_workdir = existing_job.get("workdir")
+        existing_deliver = existing_job.get("deliver")
+
+        schedule_differs = existing_expr != schedule
+        monitor_differs = existing_monitor != MONITOR_SCRIPT_NAME
+        workdir_differs = existing_workdir != str(plugin_dir())
+        deliver_differs = bool(deliver is not None and existing_deliver != deliver)
+
+        edit_cmd = [hermes, "cron", "edit", str(existing_id)]
+        if schedule_differs:
+            edit_cmd.extend(["--schedule", schedule])
+        if monitor_differs:
+            edit_cmd.extend(["--monitor-script", MONITOR_SCRIPT_NAME])
+        if workdir_differs:
+            edit_cmd.extend(["--workdir", str(plugin_dir())])
+        if deliver_differs and deliver:
+            edit_cmd.extend(["--deliver", deliver])
+
+        stale = bool(existing_workdir and not os.path.exists(existing_workdir))
+        differs = schedule_differs or monitor_differs or workdir_differs or deliver_differs
+
+        if stale:
+            message = (
+                f"Cron job {name!r} ({existing_id}) has a stale workdir that no longer "
+                f"exists on disk ({existing_workdir}); run the edit command to update it"
+            )
+        elif differs:
+            message = (
+                f"Cron job {name!r} ({existing_id}) already exists but configuration differs; "
+                "run the edit command to update it"
+            )
+        else:
+            message = "already installed and up to date; nothing created"
+
+        cmd_line = command_line(edit_cmd)
+        payload = {
+            "created": False,
+            "reused": True,
+            "id": existing_id,
+            "name": name,
+            "schedule": schedule,
+            "monitor_script": str(monitor),
+            "command": cmd_line,
+            "message": message,
+            "hint": (
+                "Hermes cron create does not deduplicate by name. "
+                f"Run `{cmd_line}` to update this job."
+            ),
+            "existing": existing_info,
+            "stdout": "",
+        }
+        if stale:
+            payload["stale"] = True
+        return payload
 
     # Hermes resolves ``--monitor-script`` *under* its own scripts directory and
     # rejects an absolute path outright ("Script path must be relative to
