@@ -28,7 +28,7 @@ from jobreach.scrapers import (
 from jobreach.scrapers.cli_base import _records_from
 from jobreach.scrapers.daijob import DaijobScraper
 from jobreach.scrapers.green import GreenScraper
-from jobreach.scrapers.indeed import LOCATION_SLUGS, IndeedScraper
+from jobreach.scrapers.indeed import LOCATION_SLUGS, PAGE_KEYS, URL_KEYS, IndeedScraper
 from jobreach.scrapers.japandev import JapanDevScraper
 from jobreach.scrapers.linkedin import LinkedInScraper
 from jobreach.scrapers.mynavi2027 import Mynavi2027Scraper
@@ -361,7 +361,7 @@ def test_indeed_retries_blocked_stealthy_with_dynamic(monkeypatch: pytest.Monkey
                 "ok": True,
                 "status": 403,
                 "url": str(spec["url"]),
-                "results": {"cards": []},
+                "results": {PAGE_KEYS[0]: []},
                 "blocked": True,
             }
         if mode == "dynamic":
@@ -369,7 +369,7 @@ def test_indeed_retries_blocked_stealthy_with_dynamic(monkeypatch: pytest.Monkey
                 "ok": True,
                 "status": 200,
                 "url": str(spec["url"]),
-                "results": {"cards": [indeed_card(title="Dynamic UI Designer")]},
+                "results": {PAGE_KEYS[0]: [indeed_card(title="Dynamic UI Designer")]},
                 "blocked": False,
             }
         raise AssertionError(f"unexpected mode: {mode}")
@@ -381,6 +381,119 @@ def test_indeed_retries_blocked_stealthy_with_dynamic(monkeypatch: pytest.Monkey
     assert len(jobs) == 1
     assert jobs[0].title == "Dynamic UI Designer"
     assert jobs[0].url == "https://jp.indeed.com/viewjob?jk=bcf91e657e236bc7"
+
+
+def _indeed_payload(spec: dict, **results: object) -> dict:
+    """A driver payload carrying whichever ``results`` keys a test needs."""
+    return {
+        "ok": True,
+        "status": 200,
+        "url": str(spec["url"]),
+        "results": dict(results),
+        "blocked": False,
+    }
+
+
+def test_indeed_reads_every_page_in_one_browser_session(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    """Both result pages come from a single browser, not one browser each.
+
+    This is the defect: ``fetch_jobs`` used to call ``evaluate_page`` per page,
+    and every call opened its own browser — a second Chromium launch, and on the
+    stealthy backend a second Cloudflare solve, for one search. ``_dispatch`` is
+    exactly where a browser is opened, so counting its calls counts the browsers.
+    """
+    dispatches: list[str] = []
+
+    async def fake_dispatch(self, spec: dict) -> dict:
+        dispatches.append(str(spec.get("mode")))
+        return _indeed_payload(
+            spec,
+            **{
+                PAGE_KEYS[0]: [indeed_card(jk="p1", url="https://jp.indeed.com/viewjob?jk=p1")],
+                PAGE_KEYS[1]: [indeed_card(jk="p2", url="https://jp.indeed.com/viewjob?jk=p2")],
+                URL_KEYS[0]: str(spec["url"]),
+                URL_KEYS[1]: "https://jp.indeed.com/jobs?q=designer&hl=ja&start=15",
+            },
+        )
+
+    monkeypatch.setattr(IndeedScraper, "_dispatch", fake_dispatch)
+    with caplog.at_level("WARNING", logger="jobreach.scrapers.indeed"):
+        jobs = asyncio.run(IndeedScraper(keyword="designer", location="tokyo").fetch_jobs())
+
+    assert len(dispatches) == 1, "one search must open one browser, not one per page"
+    assert [job.url for job in jobs] == [
+        "https://jp.indeed.com/viewjob?jk=p1",
+        "https://jp.indeed.com/viewjob?jk=p2",
+    ]
+    # The quiet half of the pair: a page 2 that really loaded says nothing.
+    assert "did not load" not in caplog.text
+
+
+def test_indeed_pages_by_navigating_to_the_next_start_url():
+    """Paging must not depend on Indeed's pager markup surviving a redesign.
+
+    ``start=`` is part of the search URL this scraper already builds, so the
+    second page is reached by navigating to it — no ``click`` step, and nothing
+    that a pager restyle can break.
+    """
+    scraper = IndeedScraper(keyword="designer", location="tokyo")
+    steps = scraper.page_steps()
+
+    gotos = [step for step in steps if "goto" in step]
+    assert [step["goto"] for step in gotos] == [scraper.build_search_url(2)]
+    assert "start=15" in gotos[0]["goto"]
+    assert not [step for step in steps if "click" in step]
+
+
+def test_indeed_tolerates_page_two_but_not_page_one():
+    """The old per-page loop kept page 1 when page 2 failed; so must this.
+
+    With both pages in one session that tolerance has to come from the step
+    vocabulary, so every step of the first page's work is required and every
+    step after it is skippable.
+    """
+    steps = IndeedScraper(keyword="designer").page_steps()
+    # The page-1 block ends at its landed-URL capture; everything past that is
+    # page 2's work.
+    page_one_end = next(
+        index for index, step in enumerate(steps) if step.get("key") == URL_KEYS[0]
+    )
+
+    assert not any(step.get("optional") for step in steps[: page_one_end + 1])
+    assert steps[page_one_end + 1 :], "there is no page-2 work to tolerate"
+    assert all(step.get("optional") for step in steps[page_one_end + 1 :])
+
+
+def test_indeed_warns_when_page_two_never_landed(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    """A skippable page 2 must still be visible in the log.
+
+    Without the landed-URL check a challenged page 2 is indistinguishable from
+    "the board had no more listings", so the run silently looks short.
+    """
+
+    async def fake_dispatch(self, spec: dict) -> dict:
+        return _indeed_payload(
+            spec,
+            **{
+                PAGE_KEYS[0]: [indeed_card()],
+                PAGE_KEYS[1]: [],  # nothing extracted …
+                URL_KEYS[0]: str(spec["url"]),
+                URL_KEYS[1]: str(spec["url"]),  # … because we never left page 1
+            },
+        )
+
+    monkeypatch.setattr(IndeedScraper, "_dispatch", fake_dispatch)
+    with caplog.at_level("WARNING", logger="jobreach.scrapers.indeed"):
+        jobs = asyncio.run(IndeedScraper(keyword="designer", location="tokyo").fetch_jobs())
+
+    # Page 1 survives …
+    assert [job.url for job in jobs] == ["https://jp.indeed.com/viewjob?jk=bcf91e657e236bc7"]
+    # … and the reason the run is short is on the record.
+    assert "did not load" in caplog.text
 
 
 # --- Mynavi ----------------------------------------------------------------
