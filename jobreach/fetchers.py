@@ -95,6 +95,18 @@ def click(selector: str, *, optional: bool = False, settle_ms: int = 0) -> dict[
     return {"click": selector, "optional": bool(optional), "wait_ms": int(settle_ms)}
 
 
+def goto(url: str, *, wait_until: str = "domcontentloaded") -> dict[str, Any]:
+    """Navigate to *url* within the existing browser session.
+
+    A board whose next result page is addressable by URL (Indeed's ``start=``)
+    can then be paged by navigating in the same browser session rather than by
+    clicking the site's pager. That removes the dependency on the pager's markup
+    surviving a redesign, and it lets one session cover several pages instead of
+    one browser launch per page.
+    """
+    return {"goto": str(url), "wait_until": str(wait_until)}
+
+
 def wait_selector(selector: str, *, state: str = "attached", timeout_ms: int | None = None) -> dict[str, Any]:
     """Wait until *selector* reaches *state*."""
     step: dict[str, Any] = {"wait_selector": selector, "state": state}

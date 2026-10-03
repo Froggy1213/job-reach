@@ -8,14 +8,18 @@ contract with a driver that prints logs on the same stream.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from jobreach import scrapling as bridge
+from jobreach.domain import JobPosting, SourcePlatform
 from jobreach.errors import ConfigError, MissingDependencyError, ScraperError
 from jobreach.fetchers import (
     FetchResult,
@@ -23,12 +27,14 @@ from jobreach.fetchers import (
     build_spec,
     click,
     evaluate,
+    goto,
     scroll,
     select_backend,
     wait,
     wait_load,
     wait_selector,
 )
+from jobreach.scrapers.base import BaseScraper
 
 # --- step vocabulary -------------------------------------------------------
 
@@ -40,11 +46,16 @@ def test_steps_serialise_to_plain_data():
         scroll(800, times=2, settle_ms=1_000),
         wait_selector("a[data-jk]", state="attached", timeout_ms=10_000),
         click('ul.pagingLink a:has-text("2")', optional=True),
+        goto("https://example.test/jobs?start=10", wait_until="domcontentloaded"),
         wait_load("domcontentloaded"),
         evaluate("() => 1", "cards"),
     ]
     encoded = json.dumps(steps)
     assert json.loads(encoded) == steps
+    assert goto("https://example.test") == {
+        "goto": "https://example.test",
+        "wait_until": "domcontentloaded",
+    }
 
 
 def test_scroll_keeps_at_least_one_pass():
@@ -284,6 +295,9 @@ class FakePage:
         self._present = present if present is not None else set()
         self._content = "<html><title>t</title></html>"
 
+    def goto(self, url: str, wait_until: str = "domcontentloaded") -> None:
+        self.actions.append(("goto", url))
+
     def wait_for_timeout(self, ms: int) -> None:
         self.actions.append(("wait", ms))
 
@@ -353,6 +367,54 @@ def test_driver_fails_loudly_on_a_required_step():
         module.run_steps(Broken(), [{"evaluate": "cards", "key": "cards"}], {})
 
 
+def test_driver_goto_ordering():
+    """Driver executes goto before subsequent wait_load, wait_selector, and evaluate."""
+    module = driver_module()
+    page = FakePage()
+    results: dict = {}
+    steps = [
+        {"goto": "https://example.test/page2", "wait_until": "domcontentloaded"},
+        {"wait_load": "domcontentloaded"},
+        {"wait_selector": "div.card"},
+        {"evaluate": "cards", "key": "page2"},
+    ]
+    module.run_steps(page, steps, results)
+    assert page.actions == [
+        ("goto", "https://example.test/page2"),
+        ("load", "domcontentloaded"),
+        ("selector", "div.card"),
+        ("evaluate", "cards"),
+    ]
+
+
+def test_driver_goto_failure_respects_optional():
+    """A failing goto step is skipped when optional=True, but raises otherwise."""
+    module = driver_module()
+
+    class FailingGotoPage(FakePage):
+        def goto(self, url: str, wait_until: str = "domcontentloaded") -> None:
+            raise RuntimeError("net::ERR_CONNECTION_REFUSED")
+
+    # Optional goto: skipped silently, later steps still execute
+    page = FailingGotoPage()
+    results: dict = {}
+    steps = [
+        {"goto": "https://example.test/page2", "optional": True},
+        {"evaluate": "cards", "key": "page2"},
+    ]
+    module.run_steps(page, steps, results)
+    assert results.get("page2") == ["card"]
+    assert page.actions == [("evaluate", "cards")]
+
+    # Non-optional goto: raises RuntimeError
+    with pytest.raises(RuntimeError, match="step 0 .* failed"):
+        module.run_steps(
+            FailingGotoPage(),
+            [{"goto": "https://example.test/page2"}],
+            {},
+        )
+
+
 def test_block_detection_only_fires_on_an_empty_challenge_page():
     module = driver_module()
     assert module.detect_block("<html>Just a moment…</html>", {}) is True
@@ -368,3 +430,195 @@ def test_block_detection_needs_an_empty_page():
     assert module.detect_block("<html>Ray ID: abc</html>", {"cards": [{"title": "x"}]}) is False
     assert module.detect_block("<html>Ray ID: abc</html>", {"cards": []}) is True
     assert module.detect_block("<html>nothing here</html>", {}) is False
+
+
+# --- Playwright fallback (_run_playwright) ---------------------------------
+
+
+class AsyncFakeLocator:
+    """Async locator stub matching Playwright's locator interface."""
+
+    def __init__(self, actions: list[tuple[str, object]], selector: str, present: bool = True) -> None:
+        self.actions = actions
+        self.selector = selector
+        self.present = present
+
+    async def count(self) -> int:
+        return 1 if self.present else 0
+
+    @property
+    def first(self) -> AsyncFakeLocator:
+        return self
+
+    async def click(self) -> None:
+        self.actions.append(("click", self.selector))
+
+
+class AsyncFakePage:
+    """Async page stub matching Playwright's Page interface used by _run_playwright."""
+
+    def __init__(
+        self,
+        *,
+        url: str = "https://example.test/initial",
+        title: str = "Test Title",
+        content: str = "<html><head><title>Test Title</title></head><body><h1>Cards</h1></body></html>",
+        present_selectors: set[str] | None = None,
+    ) -> None:
+        self.actions: list[tuple[str, object]] = []
+        self._url = url
+        self._title = title
+        self._content = content
+        self._present_selectors = present_selectors if present_selectors is not None else set()
+
+    @property
+    def url(self) -> str:
+        return self._url
+
+    async def title(self) -> str:
+        return self._title
+
+    async def content(self) -> str:
+        return self._content
+
+    async def goto(self, url: str, *, wait_until: str = "domcontentloaded", timeout: int | None = None) -> None:
+        self._url = url
+        self.actions.append(("goto", url))
+
+    async def wait_for_selector(
+        self, selector: str, *, state: str = "attached", timeout: int | None = None
+    ) -> None:
+        self.actions.append(("selector", selector))
+
+    async def wait_for_load_state(self, state: str = "domcontentloaded") -> None:
+        self.actions.append(("load", state))
+
+    async def wait_for_timeout(self, ms: int) -> None:
+        self.actions.append(("wait", ms))
+
+    async def evaluate(self, js: str) -> Any:
+        self.actions.append(("evaluate", js))
+        return ["card"] if js == "cards" else js
+
+    def locator(self, selector: str) -> AsyncFakeLocator:
+        return AsyncFakeLocator(self.actions, selector, present=selector in self._present_selectors)
+
+
+class MinimalScraper(BaseScraper):
+    """Minimal concrete scraper for testing BaseScraper fallback methods."""
+
+    @property
+    def platform(self) -> SourcePlatform:
+        return SourcePlatform.INDEED
+
+    async def fetch_jobs(self) -> list[JobPosting]:
+        return []
+
+
+def test_playwright_goto_ordering_and_payload(monkeypatch: pytest.MonkeyPatch):
+    """Playwright backend executes goto before wait_load/selector/evaluate and returns payload."""
+    fake_page = AsyncFakePage(
+        url="https://example.test/initial",
+        title="Indeed Jobs",
+        content="<html><body><div class='job'>Engineer</div></body></html>",
+        present_selectors={"button#filter"},
+    )
+
+    @contextlib.asynccontextmanager
+    async def fake_browser_page(self):
+        yield fake_page
+
+    monkeypatch.setattr(BaseScraper, "browser_page", fake_browser_page)
+    scraper = MinimalScraper()
+
+    spec = {
+        "url": "https://example.test/search",
+        "mode": "dynamic",
+        "steps": [
+            {"scroll": 800, "times": 1},
+            {"click": "button#filter"},
+            {"goto": "https://example.test/search?start=10", "wait_until": "domcontentloaded"},
+            {"wait_load": "domcontentloaded"},
+            {"wait_selector": "div.job"},
+            {"evaluate": "cards", "key": "page2_cards"},
+            {"capture": "page2_html"},
+        ],
+    }
+
+    payload = asyncio.run(scraper._run_playwright(spec))
+
+    # Verify action order: initial goto, scroll, click, goto, load, selector, evaluate
+    assert fake_page.actions == [
+        ("goto", "https://example.test/search"),
+        ("evaluate", "window.scrollBy(0, 800)"),
+        ("click", "button#filter"),
+        ("goto", "https://example.test/search?start=10"),
+        ("load", "domcontentloaded"),
+        ("selector", "div.job"),
+        ("evaluate", "cards"),
+    ]
+
+    # Explicit ordering assertion: goto before wait_load, wait_selector, and evaluate
+    goto_idx = fake_page.actions.index(("goto", "https://example.test/search?start=10"))
+    load_idx = fake_page.actions.index(("load", "domcontentloaded"))
+    sel_idx = fake_page.actions.index(("selector", "div.job"))
+    eval_idx = fake_page.actions.index(("evaluate", "cards"))
+    assert goto_idx < load_idx < sel_idx < eval_idx
+
+    # Assert directly on returned payload dict
+    assert payload == {
+        "ok": True,
+        "status": None,
+        "url": "https://example.test/search?start=10",
+        "title": "Indeed Jobs",
+        "results": {
+            "page2_cards": ["card"],
+            "page2_html": "<html><body><div class='job'>Engineer</div></body></html>",
+        },
+        "blocked": False,
+        "mode": "dynamic",
+        "html_len": len("<html><body><div class='job'>Engineer</div></body></html>"),
+    }
+
+
+def test_playwright_goto_failure_respects_optional(monkeypatch: pytest.MonkeyPatch):
+    """Playwright backend skips failing goto when optional=True, raises ScraperError otherwise."""
+    monkeypatch.setattr("jobreach.scrapers.base.RETRY_BASE_DELAY", 0.0001)
+
+    class FailingGotoPage(AsyncFakePage):
+        async def goto(self, url: str, *, wait_until: str = "domcontentloaded", timeout: int | None = None) -> None:
+            if "fail" in url:
+                raise RuntimeError("net::ERR_NAME_NOT_RESOLVED")
+            await super().goto(url, wait_until=wait_until, timeout=timeout)
+
+    fake_page = FailingGotoPage()
+
+    @contextlib.asynccontextmanager
+    async def fake_browser_page(self):
+        yield fake_page
+
+    monkeypatch.setattr(BaseScraper, "browser_page", fake_browser_page)
+    scraper = MinimalScraper()
+
+    # Optional goto failure: skipped, subsequent evaluate succeeds
+    spec_optional = {
+        "url": "https://example.test/search",
+        "steps": [
+            {"goto": "https://example.test/fail", "optional": True},
+            {"evaluate": "cards", "key": "cards"},
+        ],
+    }
+    payload = asyncio.run(scraper._run_playwright(spec_optional))
+    assert payload["ok"] is True
+    assert payload["results"]["cards"] == ["card"]
+
+    # Non-optional goto failure: raises ScraperError
+    spec_required = {
+        "url": "https://example.test/search",
+        "steps": [
+            {"goto": "https://example.test/fail"},
+        ],
+    }
+    with pytest.raises(ScraperError, match="step 0 failed"):
+        asyncio.run(scraper._run_playwright(spec_required))
+
