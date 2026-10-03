@@ -797,3 +797,114 @@ def test_job_list_forwards_detail_and_no_dedupe(tools, engine):
     call(tools.handle_job_list, {"dedupe": False})
     assert "--no-dedupe" in engine.last["args"]
 
+
+
+# --------------------------------------------------------------------------- #
+# /jobs — the one handler no wrapper protects
+# --------------------------------------------------------------------------- #
+
+
+def _stub_invoke(payload: Any = None, error: Any = None):
+    """An ``_invoke`` replacement: returns a canned ``(payload, error)`` pair.
+
+    Synchronous on purpose — ``_slash_jobs`` hands ``_invoke`` to
+    ``asyncio.to_thread``, so the real one is a blocking function.
+    """
+
+    def invoke(args: Any, **_kwargs: Any):
+        return payload, error
+
+    return invoke
+
+
+def test_slash_jobs_tolerates_a_thin_envelope(plugin, tools, monkeypatch):
+    """``/jobs`` is a slash-command handler, so ``_guard`` never wraps it.
+
+    A partial envelope must still render a digest. Indexing the job dicts
+    directly (``job["title"]``) would surface a ``KeyError`` to the user as an
+    opaque failure — the exact outcome this plugin's rules exist to prevent.
+    """
+    monkeypatch.setattr(
+        tools,
+        "_invoke",
+        _stub_invoke({"summary": {"total": 1, "new": 1}, "jobs": [{"url": "https://x.test/1"}]}),
+    )
+
+    out = asyncio.run(plugin._slash_jobs("designer"))
+    assert "https://x.test/1" in out
+    assert "Untitled" in out
+
+
+def test_slash_jobs_reports_an_engine_failure(plugin, tools, monkeypatch):
+    """A failed call answers with the engine's sentence, not an exception."""
+    monkeypatch.setattr(
+        tools, "_invoke", _stub_invoke(None, {"error": "engine exploded", "hint": "retry it"})
+    )
+
+    out = asyncio.run(plugin._slash_jobs(""))
+    assert "engine exploded" in out
+    assert "retry it" in out
+
+
+def test_slash_jobs_names_the_boards_when_there_is_nothing(plugin, tools, monkeypatch):
+    monkeypatch.setattr(
+        tools,
+        "_invoke",
+        _stub_invoke({"query": {"sources": ["wantedly"]}, "summary": {}, "jobs": []}),
+    )
+
+    out = asyncio.run(plugin._slash_jobs("designer"))
+    assert "wantedly" in out
+
+
+# --------------------------------------------------------------------------- #
+# job_list's new_since: compare instants, not ISO text
+# --------------------------------------------------------------------------- #
+
+
+def test_new_since_accepts_a_z_suffixed_threshold(tools):
+    """``…T00:00:00Z`` and ``…T00:00:00.000000+00:00`` are the same instant.
+
+    As text the first sorts *below* the second (``'Z'`` > ``'.'``), so the old
+    string compare dropped listings from the very second the caller asked for.
+    """
+    keep = tools._new_since_predicate("2026-10-03T00:00:00Z")
+
+    assert keep({"scraped_at": "2026-10-03T00:00:00.000000+00:00"}) is True
+    assert keep({"scraped_at": "2026-10-03T12:00:00+00:00"}) is True
+    assert keep({"scraped_at": "2026-10-02T23:59:59+00:00"}) is False
+
+
+def test_new_since_treats_a_bare_date_as_the_start_of_that_day(tools):
+    keep = tools._new_since_predicate("2026-10-03")
+
+    assert keep({"scraped_at": "2026-10-03T00:00:00+00:00"}) is True
+    assert keep({"scraped_at": "2026-10-02T23:59:59+00:00"}) is False
+
+
+def test_new_since_falls_back_to_text_for_a_non_timestamp(tools):
+    """A caller passing something unparseable keeps the behaviour it had."""
+    keep = tools._new_since_predicate("zzz")
+
+    assert keep({"scraped_at": "zzz-plus"}) is True
+    assert keep({"scraped_at": "aaa"}) is False
+
+
+def test_job_list_filters_on_instants_and_restates_its_counts(tools, engine):
+    engine.payload = {
+        "total": 2,
+        "shown": 2,
+        "unique": 2,
+        "hidden_duplicates": 0,
+        "jobs": [
+            {"url": "https://x.test/old", "scraped_at": "2026-10-02T23:59:59+00:00"},
+            {"url": "https://x.test/new", "scraped_at": "2026-10-03T00:00:00.500000+00:00"},
+        ],
+    }
+
+    payload = call(tools.handle_job_list, {"new_since": "2026-10-03T00:00:00Z"})
+
+    jobs = payload["result"]["jobs"]
+    assert [job["url"] for job in jobs] == ["https://x.test/new"]
+    assert payload["result"]["shown"] == 1
+    assert payload["result"]["unique"] == 1

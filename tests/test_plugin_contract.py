@@ -347,6 +347,25 @@ def test_manifest_is_v2_and_declares_only_known_capabilities(manifest: dict[str,
     assert unknown == [], f"plugin.yaml declares capabilities Hermes cannot grant: {unknown}"
 
 
+def test_all_os_differences_are_confined_to_platforms_module():
+    """Every OS difference must live in jobreach/platforms.py (AGENTS.md)."""
+    jobreach_dir = PROJECT_ROOT / "jobreach"
+    platforms_file = (jobreach_dir / "platforms.py").resolve()
+    targets = ("os.name", "sys.platform", "os.sep")
+    violations: list[str] = []
+    for path in sorted(jobreach_dir.rglob("*.py")):
+        if path.resolve() == platforms_file:
+            continue
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            for target in targets:
+                if target in line:
+                    violations.append(f"{path.relative_to(PROJECT_ROOT)}:{lineno}: {line.strip()}")
+    assert not violations, (
+        "OS differences must live exclusively in jobreach/platforms.py, found:\n"
+        + "\n".join(violations)
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Schemas ↔ handlers
 # --------------------------------------------------------------------------- #
@@ -435,10 +454,25 @@ def test_every_tool_is_documented_in_the_skill(schemas: list[dict[str, Any]]):
         assert schema["name"] in body, f"{schema['name']} is not documented in SKILL.md"
 
 
-def test_registered_tools_are_async_and_share_one_toolset(context: RecordingContext):
-    assert {tool["toolset"] for tool in context.tools} == {"job_reach"}
+def test_registered_tools_are_async_and_share_one_toolset(plugin, context: RecordingContext):
+    # Every tool carries one toolset, and it is the name the package declares —
+    # so the constant is the single source and the literal below pins its value.
+    assert {tool["toolset"] for tool in context.tools} == {plugin.TOOLSET}
+    assert plugin.TOOLSET == "job_reach"
     assert all(tool["is_async"] is True for tool in context.tools)
     assert all(tool["handler"] for tool in context.tools)
+
+
+def test_the_skill_gates_on_the_toolset_the_plugin_registers(plugin):
+    """``requires_toolsets`` gates the skill on a toolset *name*.
+
+    Hermes never cross-checks the two, so a rename on either side leaves the
+    skill installed but silently no longer matching the tools it exists to
+    describe — a failure only a human comparing two files could notice. Pinning
+    them together here is what makes such a rename fail loudly instead.
+    """
+    metadata = skill_frontmatter()["metadata"]["hermes"]
+    assert metadata["requires_toolsets"] == [plugin.TOOLSET]
 
 
 # --------------------------------------------------------------------------- #
@@ -590,10 +624,6 @@ def test_install_cron_hands_hermes_a_bare_monitor_script_name(
     monkeypatch.setattr("jobreach.install.shutil.which", lambda _name: "hermes")
 
     calls: list[list[str]] = []
-    # ``install_cron`` launches the child through ``proc.run_captured`` (for the
-    # bounded, tree-killing timeout), so that is the seam to replace here: with
-    # ``subprocess.run`` patched instead, the real ``hermes cron create`` would
-    # run — creating a cron job on the developer's machine from a unit test.
     monkeypatch.setattr("jobreach.install.run_captured", _fake_cron_create([], calls))
     payload = install_cron()
     assert payload["created"] is True
@@ -609,6 +639,62 @@ def test_install_cron_hands_hermes_a_bare_monitor_script_name(
     assert len(calls) == 2
     assert calls[1][calls[1].index("--monitor-script") + 1].endswith(MONITOR_SCRIPT_NAME)
     assert Path(payload["monitor_script"]).exists()
+
+
+def test_install_cron_passes_explicit_timeout_to_run_captured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The cron creation child must be bounded by CRON_CREATE_TIMEOUT."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr("jobreach.install.shutil.which", lambda _name: "/bin/hermes")
+    from jobreach.install import CRON_CREATE_TIMEOUT, install_cron
+
+    recorded_kwargs: list[dict[str, Any]] = []
+
+    def stub(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        recorded_kwargs.append(kwargs)
+        return subprocess.CompletedProcess(["hermes"], 0, "ok", "")
+
+    monkeypatch.setattr("jobreach.install.run_captured", stub)
+    payload = install_cron()
+    assert payload["created"] is True
+    assert len(recorded_kwargs) >= 1
+    assert "timeout" in recorded_kwargs[0]
+    assert recorded_kwargs[0]["timeout"] == CRON_CREATE_TIMEOUT
+
+
+def test_install_cron_returns_payload_on_timeout_without_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A stuck `hermes cron create` must not raise TimeoutExpired to the caller."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr("jobreach.install.shutil.which", lambda _name: "/bin/hermes")
+    from jobreach.install import install_cron
+
+    def timeout_stub(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout", 60.0))
+
+    monkeypatch.setattr("jobreach.install.run_captured", timeout_stub)
+    payload = install_cron()
+    assert isinstance(payload, dict)
+    assert payload["created"] is False
+    assert payload["message"]
+
+
+def test_generated_monitor_script_is_python_and_invokes_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The generated monitor must be Python and call the engine."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    from jobreach.install import MONITOR_SCRIPT_NAME, install_monitor_script
+
+    path = install_monitor_script(["--keyword", "designer"])
+    assert path.name == MONITOR_SCRIPT_NAME
+    assert path.suffix == ".py"
+    content = path.read_text(encoding="utf-8")
+    assert content.startswith("#!/usr/bin/env python")
+    assert "subprocess.run(" in content
+    assert '"-m", "jobreach", "monitor"' in content
 
 
 def test_command_line_quoting_matches_the_platform(monkeypatch: pytest.MonkeyPatch):

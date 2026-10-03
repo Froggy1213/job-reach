@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from jobreach.domain import JobPosting, SourcePlatform
+from jobreach.errors import ConfigError
 from jobreach.store import SQLiteJobRepository, normalize_url
 
 
@@ -180,3 +184,15 @@ def test_repository_reopens_existing_database(db_path: Path):
         repo.save_many([job("https://x.test/1")])
     with SQLiteJobRepository(db_path) as repo:
         assert repo.count() == 1
+
+
+def test_unsupported_sqlite_version_raises_config_error(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(sqlite3, "sqlite_version_info", (3, 34, 0))
+    monkeypatch.setattr(sqlite3, "sqlite_version", "3.34.0")
+    with pytest.raises(ConfigError) as exc_info:
+        SQLiteJobRepository(db_path)
+    assert "3.35" in str(exc_info.value)
+    assert "3.34.0" in str(exc_info.value)
+

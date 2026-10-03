@@ -349,6 +349,40 @@ def test_indeed_asks_for_the_stealth_browser_first():
     assert "dynamic" in IndeedScraper.fetch_modes
 
 
+def test_indeed_retries_blocked_stealthy_with_dynamic(monkeypatch: pytest.MonkeyPatch):
+    """A blocked stealthy attempt is retried with dynamic, returning its jobs."""
+    modes_attempted: list[str] = []
+
+    async def fake_dispatch(self, spec: dict[str, object]) -> dict[str, object]:
+        mode = str(spec["mode"])
+        modes_attempted.append(mode)
+        if mode == "stealthy":
+            return {
+                "ok": True,
+                "status": 403,
+                "url": str(spec["url"]),
+                "results": {"cards": []},
+                "blocked": True,
+            }
+        if mode == "dynamic":
+            return {
+                "ok": True,
+                "status": 200,
+                "url": str(spec["url"]),
+                "results": {"cards": [indeed_card(title="Dynamic UI Designer")]},
+                "blocked": False,
+            }
+        raise AssertionError(f"unexpected mode: {mode}")
+
+    monkeypatch.setattr(IndeedScraper, "_dispatch", fake_dispatch)
+    jobs = asyncio.run(IndeedScraper(keyword="designer").fetch_jobs())
+
+    assert modes_attempted == ["stealthy", "dynamic"]
+    assert len(jobs) == 1
+    assert jobs[0].title == "Dynamic UI Designer"
+    assert jobs[0].url == "https://jp.indeed.com/viewjob?jk=bcf91e657e236bc7"
+
+
 # --- Mynavi ----------------------------------------------------------------
 
 

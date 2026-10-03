@@ -7,6 +7,7 @@ is what needs testing, and it is identical for scraped and ingested listings.
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,20 @@ def test_ingest_reports_new_then_not_new(repo: SQLiteJobRepository):
     assert second["summary"]["new"] == 0
     assert second["summary"]["saved"] == 0
     assert second["jobs"][0]["is_new"] is False
+
+
+def test_repeated_ingest_updates_times_seen_and_last_seen_at(repo: SQLiteJobRepository):
+    ingest([record("https://i.test/1")], request(), repo)
+    time.sleep(0.01)
+    ingest([record("https://i.test/1")], request(), repo)
+
+    row = repo._conn.execute(
+        "SELECT times_seen, first_seen_at, last_seen_at FROM jobs WHERE url = ?",
+        ("https://i.test/1",),
+    ).fetchone()
+    assert row is not None
+    assert row["times_seen"] == 2
+    assert row["last_seen_at"] > row["first_seen_at"]
 
 
 def test_ingest_skips_invalid_records_without_failing(repo: SQLiteJobRepository):
