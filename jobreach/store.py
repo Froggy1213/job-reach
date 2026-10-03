@@ -31,9 +31,10 @@ from typing import Any
 from urllib.parse import urlparse, urlunparse
 
 from .domain import JobPosting, SourcePlatform
-from .errors import StoreError
+from .errors import ConfigError, StoreError
 
 SCHEMA_VERSION = 1
+MIN_SQLITE_VERSION = (3, 35)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -179,6 +180,15 @@ class SQLiteJobRepository(JobRepository):
     """SQLite adapter. Not thread-safe: create one per task/process."""
 
     def __init__(self, path: str | Path) -> None:
+        # save_many uses RETURNING (SQLite >= 3.35) to upsert and detect new rows in
+        # one round-trip. Running on an older libsqlite3 fails with a syntax error.
+        if sqlite3.sqlite_version_info < MIN_SQLITE_VERSION:
+            min_ver = f"{MIN_SQLITE_VERSION[0]}.{MIN_SQLITE_VERSION[1]}"
+            raise ConfigError(
+                f"SQLite >= {min_ver} is required (for RETURNING clause in save_many), "
+                f"but found {sqlite3.sqlite_version}. Please upgrade SQLite, or use a "
+                f"Python built against SQLite >= {min_ver}."
+            )
         self.path = Path(path)
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)

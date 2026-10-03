@@ -468,25 +468,56 @@ def llm_filter(
             )
             content = payload["choices"][0]["message"]["content"]
             parsed = json.loads(content)
-            classifications = (
-                parsed if isinstance(parsed, list) else parsed.get("classifications", [])
-            )
-            by_index = {
-                int(item.get("idx", item.get("index", -1))): item
-                for item in classifications
-                if isinstance(item, dict)
-            }
+            if isinstance(parsed, list):
+                classifications = parsed
+            elif isinstance(parsed, dict):
+                candidates = parsed.get("classifications")
+                if isinstance(candidates, list):
+                    classifications = candidates
+                else:
+                    classifications = next(
+                        (v for v in parsed.values() if isinstance(v, list)), []
+                    )
+            else:
+                classifications = []
+
+            by_index: dict[int, dict[str, Any]] = {}
+            for item in classifications:
+                if not isinstance(item, dict):
+                    logger.debug("skipping non-dict LLM classification entry: %r", item)
+                    continue
+                raw_idx = item.get("idx")
+                if raw_idx is None:
+                    raw_idx = item.get("index")
+                if raw_idx is None or isinstance(raw_idx, bool):
+                    logger.debug("skipping LLM classification entry without valid idx: %r", item)
+                    continue
+                try:
+                    idx = int(raw_idx)
+                except (ValueError, TypeError):
+                    logger.debug(
+                        "skipping LLM classification entry with non-numeric idx %r: %r",
+                        raw_idx,
+                        item,
+                    )
+                    continue
+                by_index[idx] = item
+
             for offset, job in enumerate(batch):
                 item = by_index.get(start + offset)
                 if item is None:
                     decisions.append(local_match(_match_text(job), profile))
                     continue
                 keep = bool(item.get("keep", False))
+                try:
+                    score = float(item.get("score", 0.5 if keep else 0.0))
+                except (ValueError, TypeError):
+                    score = 0.5 if keep else 0.0
                 decisions.append(
                     Decision(
                         keep=keep,
                         reason=str(item.get("reason") or "LLM classified"),
-                        score=float(item.get("score", 0.5 if keep else 0.0)),
+                        score=score,
                     )
                 )
         except Exception as exc:  # noqa: BLE001 — degrade, never abort a scrape

@@ -115,11 +115,13 @@ config_schema:
     type: int
     required: false
     default: 25
-    # Deliberately a *default*, not a ceiling: an explicit `limit` is obeyed.
-    # It applies to `job_list` only. `job_search` passes no `-n` at all when
-    # neither the caller nor this setting supplies one, which is what the
-    # engine's "omit for all" means — so a fresh install returns every match,
-    # and setting this is how a user caps that.
+    # Deliberately a *default*, not a ceiling: an explicit `limit` argument is
+    # obeyed. It is applied by the plugin's handlers (tools.py) as the fallback
+    # `-n` for both `job_search` and `job_list`, and reaches the engine as an
+    # ordinary flag. Hermes does not resolve the `default:` below — an unset key
+    # arrives at the handler as None and is dropped — so a fresh install passes
+    # no `-n` at all, which is the engine's "omit for all"; the 25 is only what
+    # the settings UI displays.
     description: >-
       How many listings job_list returns when the caller passes no limit, and
       the limit job_search falls back to. Unset means the engine's own default

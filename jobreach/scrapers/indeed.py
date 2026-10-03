@@ -183,7 +183,6 @@ class IndeedScraper(BaseScraper):
                     wait_selector=CARD_SELECTOR,
                     scrolls=2,
                     settle_ms=2_500,
-                    mode="stealthy",
                 )
             except ScraperError as exc:
                 if page_number == 1:

@@ -590,7 +590,11 @@ def test_install_cron_hands_hermes_a_bare_monitor_script_name(
     monkeypatch.setattr("jobreach.install.shutil.which", lambda _name: "hermes")
 
     calls: list[list[str]] = []
-    monkeypatch.setattr("jobreach.install.subprocess.run", _fake_cron_create([], calls))
+    # ``install_cron`` launches the child through ``proc.run_captured`` (for the
+    # bounded, tree-killing timeout), so that is the seam to replace here: with
+    # ``subprocess.run`` patched instead, the real ``hermes cron create`` would
+    # run — creating a cron job on the developer's machine from a unit test.
+    monkeypatch.setattr("jobreach.install.run_captured", _fake_cron_create([], calls))
     payload = install_cron()
     assert payload["created"] is True
     assert calls[0][calls[0].index("--monitor-script") + 1] == MONITOR_SCRIPT_NAME
@@ -598,7 +602,7 @@ def test_install_cron_hands_hermes_a_bare_monitor_script_name(
     # An older Hermes refuses the bare name: the absolute path is tried second.
     calls = []
     monkeypatch.setattr(
-        "jobreach.install.subprocess.run", _fake_cron_create([MONITOR_SCRIPT_NAME], calls)
+        "jobreach.install.run_captured", _fake_cron_create([MONITOR_SCRIPT_NAME], calls)
     )
     payload = install_cron()
     assert payload["created"] is True

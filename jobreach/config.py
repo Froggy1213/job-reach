@@ -79,8 +79,9 @@ def find_vault() -> Path | None:
     """Locate the Obsidian vault, or ``None`` when nothing is configured.
 
     Honours ``$OBSIDIAN_VAULT_PATH`` first, then probes the well-known
-    locations. A directory counts as a vault only if it contains ``.obsidian``
-    (or is empty, which means the user created it deliberately).
+    locations. A directory counts as a vault only if it contains ``.obsidian``,
+    which is what Obsidian itself uses to mark one — an arbitrary directory that
+    happens to sit at a candidate path is not adopted as a vault.
     """
     raw = os.environ.get("OBSIDIAN_VAULT_PATH", "").strip()
     if raw:
