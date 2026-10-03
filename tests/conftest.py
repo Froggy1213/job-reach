@@ -35,6 +35,21 @@ def _no_ambient_settings(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _neuter_indeed_precheck(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neuter Indeed block evidence probe and active cooldown for the unit suite.
+
+    The unit suite never touches the network and must never create or consult
+    the developer's real ``~/.hermes/plugin-data/job-reach`` state. Existing
+    tests monkeypatch ``_dispatch`` and call ``fetch_jobs()``; a real GET probe
+    from a CI runner or blocked network would answer HTTP 403 and fail tests
+    that expect to reach ``_dispatch``. A test that specifically tests the
+    pre-check re-patches these seams explicitly, overriding this fixture.
+    """
+    monkeypatch.setattr("jobreach.scrapers.indeed.block_evidence", lambda _url: None)
+    monkeypatch.setattr("jobreach.scrapers.indeed.active_block", lambda: None)
+
+
 @pytest.fixture()
 def data_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Isolate every test's runtime state from the developer's real ~/.hermes.
