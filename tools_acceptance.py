@@ -180,6 +180,14 @@ def main(argv: list[str]) -> int:
     home = work / "jobreach-home"
     home.mkdir()
     os.environ["JOBREACH_HOME"] = str(home)
+    # The engine's install-cron path resolves the monitor script through
+    # ``$HERMES_HOME/scripts`` (jobreach.install.scripts_root), and the job_cron
+    # check below drives that path for real. Sandboxing only JOBREACH_HOME left
+    # HERMES_HOME pointing at the developer's real ``~/.hermes``, so every run
+    # overwrote their live job-reach-monitor.py with a script that bakes in this
+    # run's throwaway settings path — silently breaking their scheduled monitor
+    # until the next reinstall. The harness must never write outside ``work``.
+    os.environ["HERMES_HOME"] = str(work / "hermes-home")
     os.environ.pop("JOBREACH_DB", None)
     os.environ.pop("JOBREACH_PYTHON", None)
 
@@ -213,6 +221,15 @@ def main(argv: list[str]) -> int:
     check("post_tool_call hook registered", ctx.hooks.get("post_tool_call"), str(list(ctx.hooks)))
 
     print("\n2. handlers never raise (hostile input, stubbed engine)")
+    # The job_cron case below is the one assertion that writes into Hermes' own
+    # tree, so prove the sandbox holds before giving it the chance. A harness
+    # that cannot promise that must stop, not overwrite a real monitor script.
+    escape = _sandbox_escape(work)
+    check("cron monitor script stays inside the sandbox", escape is None, escape or "")
+    if escape is not None:
+        shutil.rmtree(work, ignore_errors=True)
+        return _report()
+
     real_run_engine = tools.run_engine
 
     class Crashing:
@@ -228,10 +245,18 @@ def main(argv: list[str]) -> int:
         ("job_note", {"result": "not-a-dict"}),
         ("job_cron", {"schedule": 42}),
     ]
+    # job_cron is the one hostile case that reaches past the stubbed bridge and
+    # shells out to `hermes` through the engine's install-cron — which now
+    # bootstraps inside the sandboxed HERMES_HOME and can take tens of seconds.
+    # It gets the engine's own 120s ceiling plus margin; every other case must
+    # answer immediately, so the tight budget stays where it means something.
+    hostile_timeouts = {"job_cron": 180.0}
     for name, params in hostile:
         handler = ctx.tools[name]["handler"]
         try:
-            out = asyncio.run(asyncio.wait_for(handler(params), timeout=60))
+            out = asyncio.run(
+                asyncio.wait_for(handler(params), timeout=hostile_timeouts.get(name, 60))
+            )
         except Exception as exc:  # noqa: BLE001
             check(f"{name}{_short(params)} does not raise", False, f"{type(exc).__name__}: {exc}")
             continue
@@ -333,6 +358,34 @@ def main(argv: list[str]) -> int:
 def _short(params: dict) -> str:
     text = json.dumps(params, default=str)
     return f"({text[:28]})" if len(text) <= 30 else f"({text[:27]}…)"
+
+
+def _sandbox_escape(work: Path) -> str | None:
+    """Why the generated cron monitor would land outside *work*, or ``None``.
+
+    ``jobreach install-cron`` writes the monitor script to
+    ``hermes_home()/scripts/job-reach-monitor.py``, so the ``job_cron`` check is
+    the one assertion that mutates Hermes' own directory tree. Resolving the
+    directory the engine will actually use — through the package under test, the
+    same way the engine subprocess resolves it — and refusing to continue when
+    it escapes the sandbox is what turns a harness bug into a loud failure
+    instead of a silent overwrite of a real user's monitor script, whose damage
+    stays invisible until their cron job stops reporting.
+
+    Both sides are resolved before comparing: on macOS the temp directory lives
+    under ``/var``, a symlink to ``/private/var``, so a raw prefix compare would
+    report a false escape.
+    """
+    try:
+        from jobreach_plugin_under_test.jobreach.config import hermes_home
+    except Exception as exc:  # noqa: BLE001 — the guard must never be what crashes
+        return f"could not resolve the engine's Hermes home: {type(exc).__name__}: {exc}"
+    target = (hermes_home() / "scripts").resolve()
+    try:
+        target.relative_to(work.resolve())
+    except ValueError:
+        return f"the engine would write the monitor script to {target}, outside {work}"
+    return None
 
 
 def _declared_tools(plugin_dir: Path) -> set[str]:
