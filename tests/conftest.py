@@ -50,6 +50,24 @@ def _neuter_indeed_precheck(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("jobreach.scrapers.indeed.active_block", lambda: None)
 
 
+@pytest.fixture(autouse=True)
+def _isolated_homes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point every test's state roots at a throwaway directory by default.
+
+    ``data_home`` isolates the suites that ask for it, but a handler call writes
+    state too — most recently the settings snapshot the cron monitor reads
+    (``tools._settings`` → ``runtime.publish_settings``), and a bare
+    ``~/.hermes`` fallback would drop that file into the developer's real plugin
+    data, where a locally installed monitor would pick it up. Setting both roots
+    here (with the same values ``data_home`` uses, so the two never disagree)
+    makes "no test touches the real home" true by construction rather than by
+    each suite remembering to opt in. A test that needs the unset case deletes
+    the variable itself, which wins over this fixture.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    monkeypatch.setenv("JOBREACH_HOME", str(tmp_path / "job-reach-data"))
+
+
 @pytest.fixture()
 def data_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Isolate every test's runtime state from the developer's real ~/.hermes.

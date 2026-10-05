@@ -698,12 +698,18 @@ def test_generated_monitor_script_is_python_and_invokes_engine(
 
 
 def test_command_line_quoting_matches_the_platform(monkeypatch: pytest.MonkeyPatch):
-    """A printed command must be pasteable into the shell the user is in."""
+    """A printed command must be pasteable into the shell the user is in.
+
+    POSIX uses single quotes: inside double quotes the shell still expands
+    ``$``, backticks and history expansion, so a keyword like ``$(whoami)``
+    would run on paste. Windows keeps ``list2cmdline``'s double quotes.
+    """
     from jobreach.install import command_line
 
     argv = ["hermes", "cron", "create", "0 9 * * *", "find jobs", "--name", "job-reach-monitor"]
     posix = command_line(argv)
-    assert '"0 9 * * *"' in posix and '"find jobs"' in posix
+    assert "'0 9 * * *'" in posix and "'find jobs'" in posix
+    assert '"' not in posix
 
     monkeypatch.setattr("jobreach.install.is_windows", lambda: True)
     windows = command_line(argv)

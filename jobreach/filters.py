@@ -253,6 +253,10 @@ def _match_text(job: Mapping[str, Any]) -> str:
     return f"{title} {description}".strip()
 
 
+# Unknown profiles that have already been warned about, so callers bypassing argparse log once.
+_WARNED_PROFILES: set[str] = set()
+
+
 def local_match(text: str, profile: str) -> Decision:
     """Classify *text* against *profile* using regex heuristics only.
 
@@ -267,8 +271,14 @@ def local_match(text: str, profile: str) -> Decision:
         if re.search(pattern, text):
             return Decision(False, f"universal stop: {pattern}", 0.0)
 
-    if profile == "any" or profile not in _LOCAL_PATTERNS:
-        return Decision(True, f"{profile}: no universal stop matched", 0.6)
+    if profile == "any":
+        return Decision(True, "any: no universal stop matched", 0.6)
+
+    if profile not in _LOCAL_PATTERNS:
+        if profile not in _WARNED_PROFILES:
+            _WARNED_PROFILES.add(profile)
+            logger.warning("unknown filter profile %r, keeping listing (fallback)", profile)
+        return Decision(True, f"unknown profile '{profile}': no universal stop matched", 0.6)
 
     good, bad = _LOCAL_PATTERNS[profile]
 

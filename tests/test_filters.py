@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 
@@ -432,3 +433,95 @@ def test_llm_accepts_classifications_wrapped_under_alternative_key(
     assert len(result.kept) == 1
     assert result.kept[0]["filter_reason"] == "strong product fit"
     assert result.kept[0]["filter_score"] == 0.88
+
+
+# --------------------------------------------------------------------------- #
+# Regression suite: Group B (B4) and T5 (Authorization header)
+# --------------------------------------------------------------------------- #
+
+
+def test_unknown_profile_local_filter_falls_back_and_reports(
+    caplog: pytest.LogCaptureFixture,
+):
+    """B4: filter_jobs with unknown profile falls back to keep listings and flags the unknown profile."""
+    caplog.set_level(logging.WARNING)
+    jobs = [{"title": "UI Designer", "description": "Design web apps"}]
+    result = filter_jobs(jobs, profile="bogus", mode="local")
+
+    # Documented fallback: still keeps listings, never crashes
+    assert len(result.kept) == 1
+    assert result.kept[0]["title"] == "UI Designer"
+
+    # Unknown profile must be reported in the decision reason or in a logged warning
+    reason = result.kept[0]["filter_reason"]
+    unknown_in_reason = any(
+        word in reason.lower() for word in ("unknown", "unrecognized", "invalid", "fallback")
+    )
+    unknown_in_logs = any(
+        "bogus" in rec.message.lower() or "unknown" in rec.message.lower()
+        for rec in caplog.records
+    )
+    assert unknown_in_reason or unknown_in_logs, (
+        f"unknown profile was not reported in reason ({reason!r}) or logged warnings"
+    )
+
+
+def test_chat_completion_sends_real_authorization_bearer_header(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The Authorization header must send the real key ('Bearer <key>') and never a placeholder or masked value.
+
+    This regression test pins that the exact, resolved API key is transmitted verbatim in the
+    Authorization header without redaction, masking, or placeholder substitution, for both an explicit key
+    and a key resolved from provider environment variables (e.g. DEEPSEEK_API_KEY).
+    """
+    import urllib.request
+    from typing import Any
+
+    recorded_requests: list[urllib.request.Request] = []
+
+    class FakeResponse:
+        def __init__(self, data: bytes):
+            self._data = data
+
+        def read(self) -> bytes:
+            return self._data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: Any):
+            pass
+
+    def fake_urlopen(request: urllib.request.Request, timeout: float = 60.0):
+        recorded_requests.append(request)
+        return FakeResponse(json.dumps({"choices": [{"message": {"content": "[]"}}]}).encode("utf-8"))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    # 1. Key passed explicitly
+    explicit_key = "sk-live-real-secret-key-12345"
+    from jobreach import filters
+    filters._chat_completion(
+        endpoint="https://api.openai.com/v1",
+        key=explicit_key,
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "hi"}],
+        timeout=10.0,
+    )
+    assert len(recorded_requests) == 1
+    assert recorded_requests[-1].get_header("Authorization") == f"Bearer {explicit_key}"
+
+    # 2. Key resolved from environment variable (e.g. DEEPSEEK_API_KEY)
+    _clear_llm_env(monkeypatch)
+    deepseek_key = "sk-deepseek-real-live-token-67890"
+    monkeypatch.setenv("DEEPSEEK_API_KEY", deepseek_key)
+
+    filter_jobs(
+        [{"title": "UI Designer"}],
+        profile="designer",
+        mode="llm",
+    )
+    assert len(recorded_requests) == 2
+    assert recorded_requests[-1].get_header("Authorization") == f"Bearer {deepseek_key}"
+

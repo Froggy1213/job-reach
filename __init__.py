@@ -359,7 +359,17 @@ def _cli_setup(parser) -> None:
 
 
 def _cli_handler(args, **_kwargs) -> int:
-    """Run the engine with the forwarded arguments and stream its output."""
+    """Run the engine with the forwarded arguments and stream its output.
+
+    No settings are forwarded, and that is a documented limitation rather than
+    an oversight: the ``JOBREACH_SETTING_*`` bridge is populated by the tool
+    handlers, which are the only place ``ctx.get_config`` is read, so a manual
+    ``hermes job-reach …`` run resolves boards, profiles and limits from the
+    engine's own defaults. Ambient ``JOBREACH_SETTING_*`` variables that the
+    user exported in their shell still cross, because :func:`run_engine` copies
+    the environment; what does not cross is ``plugins.entries.job-reach.settings``.
+    Use the tools when the configured defaults matter.
+    """
     from .jobreach.runtime import run_engine
 
     forwarded = list(getattr(args, "args", []) or [])

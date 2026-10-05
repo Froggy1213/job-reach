@@ -6,6 +6,15 @@ Why this module exists: the engine always runs as a child process of Hermes, so
 process therefore mirrors the settings it reads into ``JOBREACH_SETTING_*``
 environment variables and this module is the one place that reads them back.
 
+To bridge settings to external processes like the cron monitor (which Hermes'
+cron runner invokes independently without importing the plugin), the plugin
+publishes a persistent JSON snapshot (``settings.json``) into the plugin data
+directory on each tool call. Independent processes read this snapshot at run
+time and merge it into their environment. Baking settings directly into the cron
+monitor script would freeze them at install time, which this project
+deliberately avoided so that later changes to ``config.yaml`` are automatically
+picked up by the scheduler.
+
 Nothing here validates against the schema in ``plugin.yaml`` — that schema is
 declared for Hermes' own load-time validation; this module only applies
 defaults and normalises types. A key that is absent or blank means "use the
@@ -20,8 +29,10 @@ down an unattended monitor over a typo in ``config.yaml``.
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Mapping, MutableMapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from . import config
@@ -138,11 +149,11 @@ def get_setting_int(key: str, default: int = 0, env: Mapping[str, str] | None = 
     choice there, they are what a half-filled form or a stringified float
     produces.
 
-    Note ``max_results`` is currently *not* read through here: the handler applies
-    it while building the CLI flags, so it never has to cross into the engine.
-    This accessor exists because the engine is the right place for the next
-    integer setting that does (a per-board page cap, say) — the plugin side has
-    its own coercion in ``tools._settings``.
+    ``max_results`` is read through here (for example, by ``list`` when no
+    explicit limit is passed), falling back to *default* if non-positive or
+    unparseable. The handler also applies it when building CLI flags, but the
+    engine consults this accessor so direct invocations and fallbacks stay
+    consistent.
     """
     raw = get_setting(key, "", env)
     if not raw:
@@ -257,3 +268,101 @@ def describe(env: Mapping[str, str] | None = None) -> dict[str, str]:
         if value:
             active[key] = value
     return active
+
+
+def snapshot_path(env: Mapping[str, str] | None = None) -> Path:
+    """Location of the persistent settings snapshot ($JOBREACH_HOME/settings.json).
+
+    *env* exists so a caller (and a test) can resolve the path from a mapping
+    instead of the process environment. Note the fallback: a mapping that names
+    neither ``JOBREACH_HOME`` nor ``HERMES_HOME`` ends up at
+    :func:`config.jobreach_home`, which reads the **process** environment — so a
+    caller that wants to stay hermetic must pass one of the two keys, and an
+    ``env`` that is merely incomplete is not a sandbox.
+    """
+    if env is not None:
+        raw = (env.get("JOBREACH_HOME", "") or "").strip()
+        if raw:
+            home = Path(raw).expanduser()
+            home.mkdir(parents=True, exist_ok=True)
+            return home / "settings.json"
+        raw_hermes = (env.get("HERMES_HOME", "") or "").strip()
+        if raw_hermes:
+            home = Path(raw_hermes).expanduser() / "plugin-data" / config.PLUGIN_ID
+            home.mkdir(parents=True, exist_ok=True)
+            return home / "settings.json"
+    return config.jobreach_home() / "settings.json"
+
+
+def publish_snapshot(
+    settings: Mapping[str, Any], env: Mapping[str, str] | None = None
+) -> Path | None:
+    """Write the plugin's last-known configuration to disk as a JSON snapshot.
+
+    Writes a JSON object mapping environment variable names to string values
+    (e.g. ``{"JOBREACH_SETTING_DEFAULT_SOURCES": "wantedly,green"}``) to
+    ``$JOBREACH_HOME/settings.json``. Reuses :func:`_coerce` and :func:`env_name`
+    so the resulting file contains exactly what :func:`apply_default_settings`
+    would inject into a child's environment. An empty or blank-free *settings*
+    mapping writes ``{}``, legitimately signaling "the user has configured
+    nothing".
+
+    Why this snapshot exists: the cron monitor is an independent process started
+    by Hermes' scheduler that never imports the plugin and cannot call
+    ``ctx.get_config()``. Baking the settings into the monitor script at install
+    time would freeze them; publishing this snapshot allows scheduled runs to
+    resolve settings dynamically at runtime.
+
+    Best-effort by contract: catches every exception, logs at debug level, and
+    returns ``None`` on failure, otherwise the :class:`Path` written.
+    """
+    try:
+        path = snapshot_path(env)
+        payload: dict[str, str] = {}
+        for key, value in settings.items():
+            text = _coerce(value)
+            if not text:
+                continue
+            payload[env_name(key)] = text
+        content = json.dumps(payload, indent=2) + "\n"
+        tmp_path = path.with_name(f".{path.name}.tmp")
+        tmp_path.write_text(content, encoding="utf-8")
+        tmp_path.replace(path)
+        logger.debug(
+            "published settings snapshot",
+            extra={"path": str(path), "keys": list(payload.keys())},
+        )
+        return path
+    except Exception as exc:
+        logger.debug("could not publish settings snapshot", extra={"error": str(exc)})
+        return None
+
+
+def load_snapshot(env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Read the settings snapshot, returning non-empty ``JOBREACH_SETTING_*`` pairs.
+
+    Returns only keys starting with :data:`SETTING_PREFIX` whose values are
+    non-empty strings. Any failure (missing file, junk JSON, wrong shape, or
+    unreadable file) returns an empty dict ``{}``. Never raises.
+    """
+    try:
+        path = snapshot_path(env)
+        if not path.is_file():
+            return {}
+        content = path.read_text(encoding="utf-8")
+        data = json.loads(content)
+        if not isinstance(data, dict):
+            return {}
+        result: dict[str, str] = {}
+        for key, val in data.items():
+            if (
+                isinstance(key, str)
+                and key.startswith(SETTING_PREFIX)
+                and isinstance(val, str)
+                and val.strip()
+            ):
+                result[key] = val.strip()
+        return result
+    except Exception as exc:
+        logger.debug("could not load settings snapshot", extra={"error": str(exc)})
+        return {}

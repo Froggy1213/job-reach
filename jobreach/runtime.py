@@ -50,7 +50,10 @@ from .platforms import uv_candidates, venv_bin_dir
 from .platforms import venv_python as venv_python_path
 from .proc import run_captured
 from .scrapers.base import PLAYWRIGHT_HINT
-from .settings import apply_default_settings
+from .settings import (
+    apply_default_settings,
+    publish_snapshot,
+)
 from .settings import describe as describe_settings
 
 logger = get_logger("runtime")
@@ -121,6 +124,23 @@ def engine_argv() -> list[str]:
     """Full argv prefix for running the engine, e.g. ``[python, "-m", "jobreach"]``."""
     python, _ = resolve_interpreter()
     return [python, "-m", "jobreach"]
+
+
+def publish_settings(settings: Mapping[str, Any]) -> None:
+    """The plugin's last read of the user's configuration, remembered for processes
+    that cannot call ctx.get_config.
+
+    Thin, never-raising delegate to :func:`jobreach.settings.publish_snapshot`.
+    Recorded on every tool call so that independent processes like the cron
+    monitor can pick up the user's configuration without freezing settings at
+    install time. Kept independent of :func:`engine_env` so tool handlers can
+    invoke it unconditionally; works even when *settings* is empty (clearing any
+    stale snapshot).
+    """
+    try:
+        publish_snapshot(settings)
+    except Exception as exc:
+        logger.debug("failed to publish settings snapshot", extra={"error": str(exc)})
 
 
 def engine_env(settings: Mapping[str, Any] | None = None) -> dict[str, str]:

@@ -16,6 +16,7 @@ compared whole rather than spot-checked.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -629,3 +630,87 @@ def test_diagnostics_reports_the_active_settings(
 
 def test_diagnostics_settings_are_empty_by_default(data_home: Path):
     assert runtime.diagnostics()["settings"] == {}
+
+
+# --------------------------------------------------------------------------- #
+# Regression suite: Group C (settings snapshot for cron monitor)
+# --------------------------------------------------------------------------- #
+
+
+def test_publish_snapshot_writes_prefixed_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """C1: publish_snapshot writes JOBREACH_SETTING_* to snapshot_path(); empty/blank writes {}."""
+    target = tmp_path / "settings.json"
+    monkeypatch.setattr(settings, "snapshot_path", lambda *args, **kwargs: target)
+
+    # 1. Configured values
+    written_path = settings.publish_snapshot({"default_sources": ["wantedly", "green"], "max_results": 30})
+    assert written_path == target
+    assert target.exists()
+    content = json.loads(target.read_text(encoding="utf-8"))
+    assert content == {
+        "JOBREACH_SETTING_DEFAULT_SOURCES": "wantedly,green",
+        "JOBREACH_SETTING_MAX_RESULTS": "30",
+    }
+
+    # 2. Empty mapping writes {}
+    settings.publish_snapshot({})
+    content_empty = json.loads(target.read_text(encoding="utf-8"))
+    assert content_empty == {}
+
+    # 3. None/blank-only mapping writes {}
+    settings.publish_snapshot({"default_keyword": None, "default_sources": "", "note_subfolder": "   "})
+    content_blank = json.loads(target.read_text(encoding="utf-8"))
+    assert content_blank == {}
+
+
+def test_load_snapshot_contract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """C2: load_snapshot returns snapshot mapping; missing/junk/unrelated returns {} or prefix-only."""
+    target = tmp_path / "settings.json"
+    monkeypatch.setattr(settings, "snapshot_path", lambda *args, **kwargs: target)
+
+    # 1. Valid snapshot file
+    valid = {"JOBREACH_SETTING_DEFAULT_SOURCES": "wantedly,green", "JOBREACH_SETTING_MAX_RESULTS": "30"}
+    target.write_text(json.dumps(valid), encoding="utf-8")
+    assert settings.load_snapshot() == valid
+
+    # 2. Missing file yields {}
+    target.unlink()
+    assert settings.load_snapshot() == {}
+
+    # 3. Junk JSON yields {}
+    target.write_text("not json at all!", encoding="utf-8")
+    assert settings.load_snapshot() == {}
+
+    # 4. JSON list yields {}
+    target.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+    assert settings.load_snapshot() == {}
+
+    # 5. Dict with unrelated keys yields only JOBREACH_SETTING_*
+    mixed = {"UNRELATED_KEY": "bar", "JOBREACH_SETTING_MAX_RESULTS": "30"}
+    target.write_text(json.dumps(mixed), encoding="utf-8")
+    assert settings.load_snapshot() == {"JOBREACH_SETTING_MAX_RESULTS": "30"}
+
+    # 6. Never raises even on I/O error
+    def boom(*args, **kwargs):
+        raise OSError("unreadable")
+
+    monkeypatch.setattr(settings, "snapshot_path", boom)
+    assert settings.load_snapshot() == {}
+
+
+def test_runtime_publish_settings_delegates_and_never_raises(monkeypatch: pytest.MonkeyPatch):
+    """C3: runtime.publish_settings never raises even when target unwritable, and delegates to publish_snapshot."""
+    delegated: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(runtime, "publish_snapshot", lambda s, *args, **kwargs: delegated.append(dict(s)))
+    runtime.publish_settings({"max_results": 5})
+    assert delegated == [{"max_results": 5}]
+
+    # Never raises even when unwritable or publish_snapshot raises
+    def exploding_publish(s, *args, **kwargs):
+        raise OSError("unwritable filesystem")
+
+    monkeypatch.setattr(runtime, "publish_snapshot", exploding_publish)
+    # Must not raise
+    runtime.publish_settings({"max_results": 5})
+

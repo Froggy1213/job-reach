@@ -5,13 +5,16 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from jobreach import settings
 from jobreach.config import plugin_dir
-from jobreach.install import install_cron
+from jobreach.install import install_cron, install_monitor_script
 
 
 @pytest.fixture()
@@ -207,3 +210,72 @@ def test_missing_or_malformed_jobs_json_falls_through_to_create(
     assert payload3["created"] is True
     calls = _read_calls(fake_hermes)
     assert len(calls) == 3
+
+
+# --------------------------------------------------------------------------- #
+# Regression suite: Group C (C4 monitor snapshot injection, C5 POSIX quoting)
+# --------------------------------------------------------------------------- #
+
+
+def test_generated_monitor_script_bakes_snapshot_and_injects_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """C4: monitor script bakes absolute snapshot path and injects JOBREACH_SETTING_* end-to-end."""
+    hermes_home = tmp_path / "hermes-home"
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.delenv("JOBREACH_PLUGIN_DIR", raising=False)
+
+    # 1. Install candidate layout so monitor script can find jobreach
+    installed_dir = hermes_home / "plugins" / "job-reach"
+    installed_pkg = installed_dir / "jobreach"
+    installed_pkg.mkdir(parents=True, exist_ok=True)
+    (installed_pkg / "__main__.py").write_text(
+        "import json, os, sys\n"
+        "active = {k: v for k, v in os.environ.items() if k.startswith('JOBREACH_SETTING_')}\n"
+        "sys.stdout.write(json.dumps(active))\n"
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+
+    script_path = install_monitor_script(job_name="test-monitor")
+    assert script_path.exists()
+
+    # Verify that the generated monitor script bakes the absolute snapshot path
+    expected_snapshot = str(settings.snapshot_path())
+    script_content = script_path.read_text(encoding="utf-8")
+    assert expected_snapshot in script_content, f"expected snapshot path {expected_snapshot!r} baked in script"
+
+    # Case 1: snapshot file present with settings
+    settings.publish_snapshot({"default_sources": ["green", "wantedly"], "max_results": 42})
+    proc = subprocess.run([sys.executable, str(script_path)], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    output = json.loads(proc.stdout)
+    assert output.get("JOBREACH_SETTING_DEFAULT_SOURCES") == "green,wantedly"
+    assert output.get("JOBREACH_SETTING_MAX_RESULTS") == "42"
+
+    # Case 2: no snapshot file present -> script still runs and passes no settings
+    snap_path = settings.snapshot_path()
+    if snap_path.exists():
+        snap_path.unlink()
+    proc_empty = subprocess.run([sys.executable, str(script_path)], capture_output=True, text=True)
+    assert proc_empty.returncode == 0, proc_empty.stderr
+    output_empty = json.loads(proc_empty.stdout)
+    assert output_empty == {}
+
+
+def test_command_line_posix_quoting(monkeypatch: pytest.MonkeyPatch):
+    """C5: command_line single-quotes special chars and leaves plain words unquoted."""
+    monkeypatch.setattr("jobreach.install.is_windows", lambda: False)
+    from jobreach.install import command_line
+
+    special = "arg$(whoami)`touch!`"
+    cmd = command_line(["jobreach", "search", "-l", "tokyo", "-k", special])
+
+    # Plain word stays unquoted
+    parts = cmd.split()
+    assert "tokyo" in parts, f"'tokyo' was quoted or modified: {cmd}"
+
+    # Argument with $(whoami), backtick, and ! is single-quoted to prevent POSIX shell expansion
+    assert f"'{special}'" in cmd or ("'" in cmd and f'"{special}"' not in cmd)
+    assert f'"{special}"' not in cmd, f"special argument must not be double-quoted: {cmd}"
+

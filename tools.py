@@ -56,6 +56,7 @@ from typing import Any
 # search path is the plugin directory, so ``jobreach`` is a subpackage of it.
 # A top-level ``import jobreach`` would only work if the plugin directory
 # happened to be on sys.path, which is not guaranteed.
+from .jobreach import runtime
 from .jobreach.runtime import run_engine
 
 logger = logging.getLogger(__name__)
@@ -211,6 +212,42 @@ def _int_arg(params: Mapping[str, Any], key: str) -> int | None:
         ) from None
 
 
+def _bool_arg(params: Mapping[str, Any], key: str, *, default: bool) -> bool:
+    """One optional boolean argument; *default* when it was omitted or blank.
+
+    A model frequently sends the string ``"false"`` instead of a JSON boolean,
+    and Python's ``bool("false")`` is ``True``. Relying on a mix of
+    ``bool(params.get(...))`` and ``is False`` silently enables or drops flags.
+    Scalars like common true/false words (``"true"``, ``"yes"``, ``"on"``,
+    ``"false"``, ``"no"``, ``"off"``) and numbers are coerced, missing or blank
+    values resolve to *default*, and unrecognised strings or container types
+    raise a typed :class:`_BadArgument`.
+    """
+    value = params.get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if not text:
+            return default
+        if text in {"true", "1", "yes", "y", "on"}:
+            return True
+        if text in {"false", "0", "no", "n", "off"}:
+            return False
+        raise _BadArgument(
+            f"`{key}` must be a boolean, got {value!r}",
+            hint=f"Pass `{key}` as a JSON boolean, or omit it.",
+        )
+    raise _BadArgument(
+        f"`{key}` must be a boolean, got {value!r}",
+        hint=f"Pass `{key}` as a JSON boolean, or omit it.",
+    )
+
+
 def _csv(value: Any) -> str:
     """A comma-separated CLI value from a string or a list of boards.
 
@@ -285,6 +322,8 @@ def _settings(ctx: Any) -> dict[str, Any]:
     """
     getter = getattr(ctx, "get_config", None)
     if not callable(getter):
+        # We did not read configuration here, so publishing {} would overwrite
+        # and erase any snapshot stored by a newer Hermes instance.
         return {}
 
     settings: dict[str, Any] = {}
@@ -312,6 +351,16 @@ def _settings(ctx: Any) -> dict[str, Any]:
             logger.warning(
                 "job-reach: ignoring max_results=%r (want a positive integer)", rejected
             )
+
+    # Publish what was read so the cron monitor — a process that can never
+    # call ctx.get_config — can see it. tools.py must keep working against a
+    # runtime predating this function, so any exception (such as an
+    # AttributeError if publish_settings is missing) is caught and debug-logged.
+    try:
+        runtime.publish_settings(settings)
+    except Exception:  # noqa: BLE001
+        logger.debug("job-reach: could not publish settings", exc_info=True)
+
     return settings
 
 
@@ -712,8 +761,24 @@ async def handle_job_search(params: dict[str, Any], *, ctx: Any = None, **kwargs
     settings = _settings(ctx)
 
     keyword = _str_arg(params, "keyword") or _str_arg(settings, "default_keyword")
-    sources = params.get("sources") or settings.get("default_sources")
+
+    raw_sources = params.get("sources")
+    if isinstance(raw_sources, (list, tuple)) and not raw_sources:
+        raise _BadArgument(
+            "`sources` cannot be an empty list",
+            hint=(
+                "Pass at least one board (e.g. sources=['wantedly']), "
+                "or omit `sources` to use the default boards."
+            ),
+        )
+    sources = raw_sources if raw_sources is not None else settings.get("default_sources")
+
     limit = _int_arg(params, "limit")
+    if limit is not None and limit < 1:
+        raise _BadArgument(
+            f"`limit` must be at least 1, got {limit}",
+            hint="Pass a positive integer for `limit`, or omit it to use the default.",
+        )
     if limit is None:
         limit = settings.get("max_results")  # already validated by _settings
 
@@ -736,15 +801,13 @@ async def handle_job_search(params: dict[str, Any], *, ctx: Any = None, **kwargs
     if source_flag:
         args.extend(["--source", source_flag])
 
-    _bool_flag(args, bool(params.get("new_only")), "--new-only")
-    _bool_flag(args, bool(params.get("detail")), "--detail")
+    _bool_flag(args, _bool_arg(params, "new_only", default=False), "--new-only")
+    _bool_flag(args, _bool_arg(params, "detail", default=False), "--detail")
     # Only an explicit `false` travels: saying nothing leaves the engine's own
     # default (collapse) in charge, so this flag cannot drift from the CLI's.
-    _bool_flag(args, params.get("dedupe") is False, "--no-dedupe")
-    if params.get("save") is False:
-        args.append("--no-save")
-    if params.get("headless") is False:
-        args.append("--headful")
+    _bool_flag(args, not _bool_arg(params, "dedupe", default=True), "--no-dedupe")
+    _bool_flag(args, not _bool_arg(params, "save", default=True), "--no-save")
+    _bool_flag(args, not _bool_arg(params, "headless", default=True), "--headful")
 
     payload, error = await asyncio.to_thread(
         _invoke, args, timeout=DEFAULT_TIMEOUT, settings=settings
@@ -769,13 +832,19 @@ async def handle_job_ingest(params: dict[str, Any], *, ctx: Any = None, **kwargs
         )
 
     source = _str_arg(params, "source") or "indeed"
+    limit = _int_arg(params, "limit")
+    if limit is not None and limit < 1:
+        raise _BadArgument(
+            f"`limit` must be at least 1, got {limit}",
+            hint="Pass a positive integer for `limit`, or omit it.",
+        )
+
     args = ["ingest", "--json", "--source", source]
-    options = _drop_none({"-n": _int_arg(params, "limit")})
+    options = _drop_none({"-n": limit})
     for flag, value in options.items():
         args.extend([flag, str(value)])
-    _bool_flag(args, bool(params.get("new_only")), "--new-only")
-    if params.get("save") is False:
-        args.append("--no-save")
+    _bool_flag(args, _bool_arg(params, "new_only", default=False), "--new-only")
+    _bool_flag(args, not _bool_arg(params, "save", default=True), "--no-save")
 
     payload, error = await asyncio.to_thread(
         _invoke,
@@ -798,6 +867,11 @@ async def handle_job_list(params: dict[str, Any], *, ctx: Any = None, **kwargs: 
     settings = _settings(ctx)
 
     limit = _int_arg(params, "limit")
+    if limit is not None and limit < 1:
+        raise _BadArgument(
+            f"`limit` must be at least 1, got {limit}",
+            hint="Pass a positive integer for `limit`, or omit it to use the default.",
+        )
     if limit is None:
         limit = settings.get("max_results")
 
@@ -813,8 +887,8 @@ async def handle_job_list(params: dict[str, Any], *, ctx: Any = None, **kwargs: 
     for flag, value in options.items():
         args.extend([flag, str(value)])
 
-    _bool_flag(args, bool(params.get("detail")), "--detail")
-    _bool_flag(args, params.get("dedupe") is False, "--no-dedupe")
+    _bool_flag(args, _bool_arg(params, "detail", default=False), "--detail")
+    _bool_flag(args, not _bool_arg(params, "dedupe", default=True), "--no-dedupe")
 
     payload, error = await asyncio.to_thread(
         _invoke, args, timeout=60.0, settings=settings
@@ -885,6 +959,14 @@ async def handle_job_status(params: dict[str, Any], *, ctx: Any = None, **kwargs
     runs = _int_arg(params, "recent_runs")
     if runs is None:
         runs = 5
+    elif runs < 0:
+        raise _BadArgument(
+            f"`recent_runs` must be non-negative, got {runs}",
+            hint=(
+                "Pass a non-negative integer for `recent_runs`, "
+                "or omit it to use the default (5)."
+            ),
+        )
 
     store, store_error = await asyncio.to_thread(
         _invoke, ["stats", "--json"], timeout=60.0, settings=settings
@@ -893,13 +975,28 @@ async def handle_job_status(params: dict[str, Any], *, ctx: Any = None, **kwargs
         _invoke, ["doctor", "--json"], timeout=60.0, settings=settings
     )
     if store_error and runtime_error:
-        return _fail(store_error["error"], hint=runtime_error.get("hint", ""))
+        hint = store_error.get("hint") or runtime_error.get("hint", "")
+        return _fail(store_error["error"], hint=hint, runtime_error=runtime_error)
+
+    warnings: dict[str, Any] = {}
+    if store_error:
+        warnings["store"] = {
+            "error": store_error["error"],
+            "hint": store_error.get("hint", ""),
+        }
+    if runtime_error:
+        warnings["runtime"] = {
+            "error": runtime_error["error"],
+            "hint": runtime_error.get("hint", ""),
+        }
+
     if store:
         store["recent_runs"] = store.get("recent_runs", [])[:runs]
     return _ok(
         {
             "store": store,
             "runtime": runtime,
+            "warnings": warnings,
             "recent_tool_calls": journal_read(ctx),
         }
     )
@@ -912,10 +1009,8 @@ async def handle_job_setup(params: dict[str, Any], *, ctx: Any = None, **kwargs:
     settings = _settings(ctx)
 
     args = ["setup", "--json"]
-    if params.get("with_browser") is False:
-        args.append("--no-browser")
-    if params.get("force"):
-        args.append("--force")
+    _bool_flag(args, not _bool_arg(params, "with_browser", default=True), "--no-browser")
+    _bool_flag(args, _bool_arg(params, "force", default=False), "--force")
 
     payload, error = await asyncio.to_thread(
         _invoke, args, timeout=900.0, settings=settings
@@ -923,22 +1018,39 @@ async def handle_job_setup(params: dict[str, Any], *, ctx: Any = None, **kwargs:
 
     skill_path = None
     skill_warning = None
-    if params.get("install_skill", True):
+    skill_error_msg = None
+    if _bool_arg(params, "install_skill", default=True):
         skill_payload, skill_error = await asyncio.to_thread(
             _invoke, ["install-skill", "--json"], timeout=60.0, settings=settings
         )
         if skill_error:
-            payload = payload or {}
-            payload["skill_error"] = skill_error["error"]
+            skill_error_msg = skill_error.get("error")
         elif skill_payload:
             skill_path = skill_payload.get("skill")
             skill_warning = skill_payload.get("warning")
 
-    if error and not skill_path:
-        return _fail(**error)
+    if error:
+        # A successful skill installation must never mask a failed setup. The
+        # scraping runtime (venv, Playwright, Chromium) is the primary deliverable;
+        # reporting success just because the markdown skill was copied leaves
+        # the agent believing the runtime is ready when scraping will fail.
+        extras: dict[str, Any] = {}
+        if skill_path is not None:
+            extras["skill"] = skill_path
+        if skill_warning is not None:
+            extras["skill_warning"] = skill_warning
+        if skill_error_msg is not None:
+            extras["skill_error"] = skill_error_msg
+        return _fail(error["error"], hint=error.get("hint", ""), **extras)
+
     result_payload: dict[str, Any] = {"setup": payload, "skill": skill_path}
     if skill_warning:
         result_payload["skill_warning"] = skill_warning
+    if skill_error_msg:
+        # Top level, beside skill_warning: the error is about the skill, not
+        # about the setup payload the engine returned, and a model that reads
+        # `skill` here must not have to know to look one level deeper for why.
+        result_payload["skill_error"] = skill_error_msg
     return _ok(result_payload)
 
 
