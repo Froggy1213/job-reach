@@ -14,7 +14,7 @@ on the user's behalf. The practical consequence for anyone editing this code is
 that **the consumer of every interface is a model, not a person.** Tool schemas
 are prompt engineering, JSON output is a contract, error strings are
 instructions, and a failure only a human could interpret is a bug. The README's
-"From manual research to agent support" has the full reasoning.
+"Design constraints" has the full reasoning.
 
 ## Non-negotiable constraints
 
@@ -118,13 +118,15 @@ so the CLI never demands a browser stack for a board that does not use one, and
 set `url_encodes_keyword = True` when the API filters server-side.
 
 **A board that renders with JavaScript or sits behind a challenge.** Build a
-*step list* (`jobreach.fetchers`: `wait`, `scroll`, `evaluate`, `click`,
-`wait_selector`, `capture`) and hand it to `BaseScraper.fetch` /
+*step list* (`jobreach.fetchers`: `wait`, `scroll`, `evaluate`, `click`, `goto`,
+`wait_load`, `wait_selector`, `capture`) and hand it to `BaseScraper.fetch` /
 `evaluate_page`. Never open a browser in the scraper: both backends
 (Scrapling in its own interpreter, Playwright in the plugin venv) execute the
 same vocabulary, and that is what keeps a board from working on one and
 silently breaking on the other. `click(..., optional=True)` is the idiom for
-"follow the pager while it exists".
+"follow the pager while it exists", and `goto(url)` is how a board whose next
+page is addressable by URL keeps several pages inside **one** browser session —
+implement it on both backends or neither.
 
 Either way, register it:
 
