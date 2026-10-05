@@ -130,7 +130,9 @@ shrug:
 - **Cron monitoring** — the generated monitor script is **Python**, not bash.
   Hermes runs `.sh` scripts through bash (absent on a stock Windows install) and
   everything else through its own interpreter, so a `.py` monitor behaves the
-  same on all three platforms.
+  same on all three platforms. It merges the `$JOBREACH_HOME/settings.json`
+  snapshot at run time so scheduled runs pick up `config.yaml` edits on any
+  platform.
 - **`uv` discovery** — includes `%LOCALAPPDATA%\uv\uv.exe` and friends.
 - **Printed commands** — quoted with Windows rules when the shell is Windows.
 - **LinkedIn** is the one third-party caveat: it depends on `opencli` and a
@@ -193,6 +195,19 @@ hermes job-reach search --keyword "frontend engineer" --source wantedly -n 10
 
 Plus a `/jobs <keyword>` slash command and a `hermes job-reach …` CLI that
 exposes the same engine to a human.
+
+### Result ordering
+
+`job_search` results are returned **new-first** (`is_new: true` rows outrank previously seen rows). Within each group (new vs. seen), listings are ordered **newest-first**: an explicit publication date (`posted_at`) outranks a synthesized or missing date, and higher timestamps sort earlier. The Obsidian note renderer (`job_note`) groups listings by board itself, so markdown note layout and board grouping are unaffected.
+
+### Tool argument handling and envelopes
+
+Tool handlers validate arguments strictly and return structured JSON envelopes rather than failing silently or raising exceptions:
+
+- **Boolean arguments:** handlers accept real JSON booleans as well as case-insensitive strings (`true`, `false`, `1`, `0`, `yes`, `no`, `y`, `n`, `on`, `off`). Any other value raises a typed error naming the argument, eliminating bugs where strings like `"false"` enabled flags (`new_only`, `detail`) or triggered a venv wipe on `force: "false"`.
+- **Bounds and empty inputs:** `limit` must be an integer ≥ 1 if passed (0 is rejected with a hint; omit `limit` for search to return all matches or the configured `max_results`); `recent_runs` in `job_status` must be ≥ 0; `sources: []` is an explicit error with a hint rather than a silent fallback to default boards.
+- **Diagnostic warnings in `job_status`:** always returns a `warnings` mapping (`{"store": {...}}` / `{"runtime": {...}}`). A half-failed diagnostics call (e.g. database error while doctor succeeds, or vice versa) is visible instead of disappearing behind a bare `null`, and a total failure preserves both error messages.
+- **Honest setup reporting in `job_setup`:** setup never reports success if runtime preparation failed (venv creation, Playwright, or Chromium download), even if installing the skill succeeded — the failure envelope retains the error text, `skill` path, and any `skill_warning`. When runtime setup succeeds but skill installation fails, the success envelope carries a top-level `skill_error`.
 
 ---
 
@@ -268,14 +283,14 @@ Six user-visible knobs live in Hermes' `config.yaml` (`$HERMES_HOME/config.yaml`
 by default `~/.hermes/config.yaml`) under the plugin's own namespace, which
 Hermes validates against `config_schema` in `plugin.yaml`. They are read
 through `ctx.get_config` on every tool call, so an edit takes effect on the next
-call — no Hermes restart.
+tool call AND on the next scheduled monitor run — no Hermes restart.
 
 | Setting | `config.yaml` path | Default | Effect |
 |---------|--------------------|---------|--------|
 | `default_keyword` | `plugins.entries.job-reach.settings.default_keyword` | `""` | Keyword `job_search` uses when the caller passes none. Empty means the built-in design feed. |
 | `default_sources` | `plugins.entries.job-reach.settings.default_sources` | `[]` | Boards searched when the caller passes no `sources`. Empty means the built-in board set (`wantedly`, `mynavi2027`, `linkedin`). Warning: adding `indeed` here makes every bare search and the daily monitor pay its worst-case time on slow networks (up to ~4 min unblocked, capped at <1 s with a 30-minute cooldown on hard blocks). |
 | `note_subfolder` | `plugins.entries.job-reach.settings.note_subfolder` | `"job-searches"` | Subfolder inside the Obsidian vault that `job_note` writes into. |
-| `max_results` | `plugins.entries.job-reach.settings.max_results` | unset | How many listings `job_list` returns when no `limit` is passed, and the limit `job_search` falls back to. Unset means the engine's own default — all matches for a search — so set it if you want searches capped. An explicit `limit` always wins. |
+| `max_results` | `plugins.entries.job-reach.settings.max_results` | unset | How many listings `job_list` returns when no `limit` is passed (default: 25 when unset or invalid), and the limit `job_search` falls back to. The engine's manual `jobreach list` mirrors this same default (25 when unset or invalid) so the manual CLI agrees with the tool path. For searches, unset means all matches, so set it if you want searches capped. An explicit `limit` always wins. |
 | `default_validation` | `plugins.entries.job-reach.settings.default_validation` | `"off"` | Relevance filter used when a call passes no `validation` (a bare `jobreach search` passes no `--validate` either): `off` returns every match, `local` drops the obvious noise with free regex heuristics, `llm` classifies against the profile below and needs an API key. Set it to `local` to make a bare search return the relevant listings instead of everything. An explicit argument always wins. |
 | `default_profile` | `plugins.entries.job-reach.settings.default_profile` | `"designer"` | Filter profile used when a call passes no `profile`: `designer`, `frontend`, `engineering`, `product` or `any`. It only has an effect while relevance filtering is on (`local` or `llm`). An explicit argument always wins. |
 
@@ -299,6 +314,13 @@ key left out of `config.yaml` means "use the default", never "override with
 nothing" — and a value outside the allowed list is a warning on stderr plus the
 default, never a failure.
 
+**The manual CLI path does not read configured settings.** `hermes job-reach …`
+(and `python -m jobreach …`) forwards no settings — only ambient
+`JOBREACH_SETTING_*` variables exported in your shell cross — so a manual run
+resolves boards, profiles and limits from the engine's own built-in defaults.
+`config.yaml` settings will not alter a manual command; use the agent tools
+when configured defaults matter.
+
 ### Environment variables
 
 `JOBREACH_SETTING_*` (`JOBREACH_SETTING_DEFAULT_KEYWORD`,
@@ -306,8 +328,26 @@ default, never a failure.
 `JOBREACH_SETTING_MAX_RESULTS`, `JOBREACH_SETTING_DEFAULT_VALIDATION`,
 `JOBREACH_SETTING_DEFAULT_PROFILE`) is the **internal bridge**, not a user-facing
 knob: the plugin process mirrors the settings it read into those variables so
-the engine subprocess (which cannot reach `ctx.get_config`) can see them. Set
-the `config.yaml` keys above instead. The variables listed here are genuine
+the engine subprocess (which cannot reach `ctx.get_config`) can see them.
+
+To bridge settings to external processes like the cron monitor (which Hermes'
+scheduler runs independently without importing the plugin), the plugin writes a
+JSON snapshot to `$JOBREACH_HOME/settings.json` (default
+`$HERMES_HOME/plugin-data/job-reach/settings.json`) every time a tool call reads
+the configuration (`tools._settings` → `jobreach.runtime.publish_settings` →
+`jobreach.settings.publish_snapshot`). The snapshot maps environment-variable
+names to strings (e.g. `{"JOBREACH_SETTING_DEFAULT_SOURCES": "wantedly,green"}`).
+Nothing sensitive is stored (only the six config keys), and the file is
+rewritten even when nothing is configured so it always reflects the last
+configuration the plugin saw. The generated monitor script bakes that path and
+merges the snapshot into the engine child's environment at run time, so a later
+`config.yaml` change is picked up on the next scheduled run instead of being
+frozen at install time. Plugin settings win over ambient `JOBREACH_SETTING_*`
+variables; a missing or unreadable snapshot is ignored and the monitor runs
+with its built-in defaults.
+
+Set the `config.yaml` keys above instead of setting `JOBREACH_SETTING_*` by
+hand. The variables listed here are genuine
 user knobs — `JOBREACH_HOME`, `JOBREACH_DB` and the rest are read directly and
 remain supported.
 
@@ -341,6 +381,11 @@ jobreach install-skill | install-cron
 ```
 
 Logs always go to stderr, so `--json` output on stdout is safe to parse.
+
+Key CLI defaults and validation:
+- **`jobreach list` limit default:** `-n` defaults to the mirrored `max_results` setting (25 when unset or invalid), so manual listing agrees with `job_list`. `jobreach search` continues to default to all matches when `-n` is omitted.
+- **`--profile` validation:** `jobreach search --profile` and `jobreach monitor --profile` validate arguments against the supported profiles (`designer`, `frontend`, `engineering`, `product`, `any`) and reject invalid profiles with an argparse usage error (exit code 2). If an unknown profile reaches the filter layer directly (e.g. via direct Python API call), it falls back to keeping the listing, records the unknown profile in the decision reason, and logs a warning once.
+- **Manual CLI settings:** as noted under Configuration, manual `jobreach` and `hermes job-reach` commands do not read `config.yaml` settings.
 
 ---
 
@@ -376,6 +421,8 @@ What takes effect when:
 - **Plugin changes** (`tools.py`, `schemas.py`, `__init__.py`): require a
   **Hermes restart**, because those modules load directly inside Hermes' own
   process at startup.
+- **Configuration edits** (`config.yaml`): live on the next tool call and on the
+  next scheduled monitor run without a restart.
 
 ---
 

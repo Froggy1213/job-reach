@@ -420,7 +420,13 @@ def test_dedupe_false_returns_every_row_untouched(repo: SQLiteJobRepository):
         repo,
         dedupe=False,
     )
-    assert [job["url"] for job in result["jobs"]] == ["https://i.test/1", "https://i.test/2"]
+    # Order-agnostic on purpose: this test pins that an un-deduped list is the
+    # raw one (every row, un-collapsed shape). Display order is its own promise
+    # and is pinned by test_pipeline_order_new_first_then_recency — before the
+    # recency key existed, both rows tied on (is_new, platform, title) and this
+    # assertion was really pinning Python's stable sort.
+    assert {job["url"] for job in result["jobs"]} == {"https://i.test/1", "https://i.test/2"}
+    assert len(result["jobs"]) == 2
     assert result["summary"]["total"] == 2
     assert result["summary"]["unique"] == 2
     assert result["summary"]["hidden_duplicates"] == 0
@@ -470,4 +476,62 @@ def test_query_collapses_stored_rows_and_returns_the_body_on_request(
     raw = query(repo, limit=10, dedupe=False)
     assert len(raw) == 2
     assert all("duplicates" not in item for item in raw)
+
+
+# --------------------------------------------------------------------------- #
+# Regression suite: Group B (pipeline ordering by new-first then recency)
+# --------------------------------------------------------------------------- #
+
+
+def test_pipeline_order_new_first_then_recency(repo: SQLiteJobRepository):
+    """B3: jobs are ordered new-first and, within same is_new value, newest-first by _recency."""
+    newest = datetime(2026, 9, 1, tzinfo=UTC)
+    middle = datetime(2026, 6, 1, tzinfo=UTC)
+    older = datetime(2026, 1, 1, tzinfo=UTC)
+
+    # Pre-populate known (not new) listings in repository
+    known_newest = posting("https://i.test/known-1", title="Alpha Vacancy", company="Comp 1", posted_at=newest)
+    known_older = posting("https://i.test/known-2", title="Beta Vacancy", company="Comp 2", posted_at=older)
+    known_nodate = posting("https://i.test/known-3", title="Gamma Vacancy", company="Comp 3", posted_at=None)
+    finish([known_newest, known_older, known_nodate], repo)
+
+    # New listings that have not been seen before
+    new_middle = posting("https://i.test/new-mid", title="Delta Vacancy", company="Comp 4", posted_at=middle)
+    new_newest = posting("https://i.test/new-top", title="Epsilon Vacancy", company="Comp 5", posted_at=newest)
+    new_nodate = posting("https://i.test/new-nodate", title="Zeta Vacancy", company="Comp 6", posted_at=None)
+
+    # Ingest / finish with all 6 listings
+    result = finish(
+        [
+            known_older,
+            new_middle,
+            known_newest,
+            new_nodate,
+            known_nodate,
+            new_newest,
+        ],
+        repo,
+    )
+
+    urls = [job["url"] for job in result["jobs"]]
+
+    # 1. New listings come first (new_newest, new_middle, new_nodate),
+    # even though known_newest has a newer date than new_middle.
+    # This pins the pre-existing "new listings are ordered first" promise.
+    assert urls[:3] == [
+        "https://i.test/new-top",     # new + newest date
+        "https://i.test/new-mid",     # new + middle date
+        "https://i.test/new-nodate",  # new + no date (has posted_at precedes none)
+    ]
+
+    # 2. Known listings follow, ordered newest-first by _recency
+    assert urls[3:] == [
+        "https://i.test/known-1",   # known + newest date
+        "https://i.test/known-2",   # known + older date
+        "https://i.test/known-3",   # known + no date
+    ]
+
+    # Explicit check: new_middle (new, older date) precedes known_newest (known, newer date)
+    assert urls.index("https://i.test/new-mid") < urls.index("https://i.test/known-1")
+
 

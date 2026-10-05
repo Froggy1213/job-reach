@@ -957,3 +957,300 @@ def test_job_setup_surfaces_skill_warning(tools, monkeypatch):
     assert payload["success"] is True
     assert payload["skill"] == "/tmp/SKILL.md"
     assert payload["skill_warning"] == "Skill 'job-reach' is disabled in config.yaml"
+
+
+# --------------------------------------------------------------------------- #
+# Regression suite: Group A (tools.py argument coercion, flags, envelopes)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # Real bools
+        pytest.param(True, True, id="bool-true"),
+        pytest.param(False, False, id="bool-false"),
+        # Strings False
+        pytest.param("false", False, id="str-false"),
+        pytest.param("False", False, id="str-false-title"),
+        pytest.param("FALSE", False, id="str-false-upper"),
+        pytest.param("0", False, id="str-zero"),
+        pytest.param("no", False, id="str-no"),
+        pytest.param("NO", False, id="str-no-upper"),
+        pytest.param("n", False, id="str-n"),
+        pytest.param("N", False, id="str-n-upper"),
+        pytest.param("off", False, id="str-off"),
+        pytest.param("OFF", False, id="str-off-upper"),
+        pytest.param("  false  ", False, id="str-false-whitespace"),
+        # Strings True
+        pytest.param("true", True, id="str-true"),
+        pytest.param("True", True, id="str-true-title"),
+        pytest.param("TRUE", True, id="str-true-upper"),
+        pytest.param("1", True, id="str-one"),
+        pytest.param("yes", True, id="str-yes"),
+        pytest.param("YES", True, id="str-yes-upper"),
+        pytest.param("y", True, id="str-y"),
+        pytest.param("Y", True, id="str-y-upper"),
+        pytest.param("on", True, id="str-on"),
+        pytest.param("ON", True, id="str-on-upper"),
+        pytest.param("  true  ", True, id="str-true-whitespace"),
+        # Numbers as != 0
+        pytest.param(1, True, id="num-1"),
+        pytest.param(-1, True, id="num-minus-1"),
+        pytest.param(42, True, id="num-42"),
+        pytest.param(0, False, id="num-0"),
+        # Missing / None / blank -> default
+        pytest.param(None, False, id="none-default-false"),
+        pytest.param("", False, id="empty-default-false"),
+        pytest.param("   ", False, id="blank-default-false"),
+    ],
+)
+def test_bool_arg_coercion_table(tools, raw, expected):
+    """A1 helper unit test: _bool_arg accepts bools, truthy/falsy strings, numbers, blanks."""
+    params = {} if raw is None and expected is True else {"flag": raw}
+    assert tools._bool_arg(params, "flag", default=False) is expected
+    # Also verify default=True branch for missing/None/blank
+    if raw in (None, "", "   "):
+        assert tools._bool_arg({"flag": raw}, "flag", default=True) is True
+    assert tools._bool_arg({}, "flag", default=True) is True
+
+
+@pytest.mark.parametrize("invalid", ["maybe", [1, 2], {"nested": True}])
+def test_bool_arg_invalid_values_produce_error_envelope(tools, engine, invalid):
+    """A1 handler envelope: unrecognised strings or list/dict produce error envelope naming arg."""
+    payload = call(tools.handle_job_search, {"new_only": invalid})
+    assert payload["success"] is False
+    assert "new_only" in payload["error"]
+
+
+def test_string_false_in_handlers_matches_boolean_false(tools, engine):
+    """A2: In handlers, string 'false' behaves identically to JSON boolean false."""
+    # job_search {"new_only": "false", "detail": "false"} -> neither in argv
+    call(tools.handle_job_search, {"new_only": "false", "detail": "false"})
+    assert "--new-only" not in engine.last["args"]
+    assert "--detail" not in engine.last["args"]
+
+    # "true" -> both present
+    call(tools.handle_job_search, {"new_only": "true", "detail": "true"})
+    assert "--new-only" in engine.last["args"]
+    assert "--detail" in engine.last["args"]
+
+    # job_search {"dedupe": "false"} -> --no-dedupe
+    call(tools.handle_job_search, {"dedupe": "false"})
+    assert "--no-dedupe" in engine.last["args"]
+
+    # job_search {"save": "false"} -> --no-save
+    call(tools.handle_job_search, {"save": "false"})
+    assert "--no-save" in engine.last["args"]
+
+    # job_search {"headless": "false"} -> --headful
+    call(tools.handle_job_search, {"headless": "false"})
+    assert "--headful" in engine.last["args"]
+
+    # job_list {"detail": "false"} -> no --detail; {"dedupe": "false"} -> --no-dedupe
+    call(tools.handle_job_list, {"detail": "false", "dedupe": "false"})
+    assert "--detail" not in engine.last["args"]
+    assert "--no-dedupe" in engine.last["args"]
+
+    # job_ingest {"new_only": "false"} -> no --new-only
+    call(
+        tools.handle_job_ingest,
+        {"jobs": [{"title": "UI Designer", "url": "https://i.test/1"}], "new_only": "false"},
+    )
+    assert "--new-only" not in engine.last["args"]
+
+    # job_setup {"with_browser": "false"} -> --no-browser
+    engine.calls.clear()
+    call(tools.handle_job_setup, {"with_browser": "false"})
+    setup_args = next(c["args"] for c in engine.calls if c["args"][:1] == ["setup"])
+    assert "--no-browser" in setup_args
+
+    # job_setup {"force": "false"} -> NO --force
+    engine.calls.clear()
+    call(tools.handle_job_setup, {"force": "false"})
+    setup_args = next(c["args"] for c in engine.calls if c["args"][:1] == ["setup"])
+    assert "--force" not in setup_args
+
+    # job_setup {"force": "true"} -> --force
+    engine.calls.clear()
+    call(tools.handle_job_setup, {"force": "true"})
+    setup_args = next(c["args"] for c in engine.calls if c["args"][:1] == ["setup"])
+    assert "--force" in setup_args
+
+    # job_setup {"install_skill": "false"} -> install-skill never invoked
+    engine.calls.clear()
+    call(tools.handle_job_setup, {"install_skill": "false"})
+    assert not any(c["args"][:1] == ["install-skill"] for c in engine.calls)
+
+
+@pytest.mark.parametrize("bad_limit", [0, -1, -10])
+def test_limit_zero_or_negative_returns_error_envelope(tools, engine, bad_limit):
+    """A3: limit <= 0 on search, ingest, list is an error envelope with a hint."""
+    for handler, base_params in (
+        (tools.handle_job_search, {}),
+        (tools.handle_job_ingest, {"jobs": [{"title": "t", "url": "https://i.test/1"}]}),
+        (tools.handle_job_list, {}),
+    ):
+        payload = call(handler, {**base_params, "limit": bad_limit})
+        assert payload["success"] is False
+        assert "limit" in payload["error"].lower() or "integer" in payload["error"].lower()
+        assert "hint" in payload and payload["hint"]
+
+
+def test_limit_positive_reaches_argv(tools, engine):
+    """A3: limit >= 1 still reaches argv as -n <limit>."""
+    call(tools.handle_job_search, {"limit": 5})
+    assert _flag(engine.last["args"], "-n") == "5"
+
+    call(tools.handle_job_ingest, {"jobs": [{"title": "t", "url": "https://i.test/1"}], "limit": 3})
+    assert _flag(engine.last["args"], "-n") == "3"
+
+    call(tools.handle_job_list, {"limit": 10})
+    assert _flag(engine.last["args"], "-n") == "10"
+
+
+def test_job_status_recent_runs_boundary(tools, engine):
+    """A3: job_status recent_runs: -1 is an error; 0 is success with empty list."""
+    payload_neg = call(tools.handle_job_status, {"recent_runs": -1})
+    assert payload_neg["success"] is False
+    assert "hint" in payload_neg and payload_neg["hint"]
+
+    engine.payload = {"recent_runs": [1, 2, 3]}
+    payload_zero = call(tools.handle_job_status, {"recent_runs": 0})
+    assert payload_zero["success"] is True
+    assert payload_zero["store"]["recent_runs"] == []
+
+
+def test_job_setup_engine_failure_with_skill_success(tools, monkeypatch):
+    """A4: job_setup when setup engine call fails and install-skill succeeds -> success: false, error preserved, skill present."""
+    def invoke_stub(args, **_kwargs):
+        if args[0] == "setup":
+            return None, {"error": "Chromium installation failed", "hint": "check network"}
+        if args[0] == "install-skill":
+            return {"skill": "/tmp/skills/SKILL.md"}, None
+        return {}, None
+
+    monkeypatch.setattr(tools, "_invoke", invoke_stub)
+    payload = call(tools.handle_job_setup, {})
+    assert payload["success"] is False
+    assert "Chromium installation failed" in payload["error"]
+    assert "skill" in payload
+    assert payload["skill"] == "/tmp/skills/SKILL.md"
+
+
+def test_job_setup_engine_success_with_skill_failure(tools, monkeypatch):
+    """A4: job_setup when setup succeeds and install-skill fails -> success: true with skill_error."""
+    def invoke_stub(args, **_kwargs):
+        if args[0] == "setup":
+            return {"ok": True}, None
+        if args[0] == "install-skill":
+            return None, {"error": "permission denied on skills dir", "hint": "run chmod"}
+        return {}, None
+
+    monkeypatch.setattr(tools, "_invoke", invoke_stub)
+    payload = call(tools.handle_job_setup, {})
+    assert payload["success"] is True
+    assert "skill_error" in payload
+    assert "permission denied on skills dir" in payload["skill_error"]
+
+
+def test_job_status_partial_failure_stats_fails_doctor_succeeds(tools, monkeypatch):
+    """A5: stats fails, doctor succeeds -> success: true, store null, runtime present, warnings.store.error."""
+    def invoke_stub(args, **_kwargs):
+        if args[0] == "stats":
+            return None, {"error": "database is locked", "hint": "retry shortly"}
+        if args[0] == "doctor":
+            return {"plugin_version": "0.1.0", "sqlite_ok": True}, None
+        return {}, None
+
+    monkeypatch.setattr(tools, "_invoke", invoke_stub)
+    payload = call(tools.handle_job_status, {})
+    assert payload["success"] is True
+    assert payload["store"] is None
+    assert payload["runtime"] == {"plugin_version": "0.1.0", "sqlite_ok": True}
+    assert "warnings" in payload
+    assert payload["warnings"]["store"]["error"] == "database is locked"
+    assert "hint" in payload["warnings"]["store"]
+    assert "runtime" not in payload.get("warnings", {})
+
+
+def test_job_status_partial_failure_doctor_fails_stats_succeeds(tools, monkeypatch):
+    """A5: doctor fails, stats succeeds -> success: true, store present, runtime null, warnings.runtime.error."""
+    def invoke_stub(args, **_kwargs):
+        if args[0] == "stats":
+            return {"total": 42, "recent_runs": []}, None
+        if args[0] == "doctor":
+            return None, {"error": "python 3.10 is too old", "hint": "upgrade python"}
+        return {}, None
+
+    monkeypatch.setattr(tools, "_invoke", invoke_stub)
+    payload = call(tools.handle_job_status, {})
+    assert payload["success"] is True
+    assert payload["store"]["total"] == 42
+    assert payload["runtime"] is None
+    assert "warnings" in payload
+    assert payload["warnings"]["runtime"]["error"] == "python 3.10 is too old"
+    assert "hint" in payload["warnings"]["runtime"]
+    assert "store" not in payload.get("warnings", {})
+
+
+def test_job_status_both_fail_returns_error_envelope(tools, monkeypatch):
+    """A5: both stats and doctor fail -> success: false and both error texts are visible in envelope."""
+    def invoke_stub(args, **_kwargs):
+        if args[0] == "stats":
+            return None, {"error": "stats store corrupted", "hint": "h1"}
+        if args[0] == "doctor":
+            return None, {"error": "doctor diagnostics crashed", "hint": "h2"}
+        return {}, None
+
+    monkeypatch.setattr(tools, "_invoke", invoke_stub)
+    payload = call(tools.handle_job_status, {})
+    assert payload["success"] is False
+    raw = json.dumps(payload)
+    assert "stats store corrupted" in raw
+    assert "doctor diagnostics crashed" in raw
+
+
+def test_job_search_empty_sources_list_is_an_error(tools, engine):
+    """A6: job_search {"sources": []} produces error envelope with hint; omitting sources uses default."""
+    # Empty list is an error envelope with a hint
+    payload = call(
+        tools.handle_job_search,
+        {"sources": []},
+        ctx=FakeContext({"default_sources": ["wantedly"]}),
+    )
+    assert payload["success"] is False
+    assert "sources" in payload["error"].lower()
+    assert "hint" in payload and payload["hint"]
+
+    # Omitting sources still uses the configured default_sources
+    payload_omitted = call(
+        tools.handle_job_search,
+        {},
+        ctx=FakeContext({"default_sources": ["wantedly"]}),
+    )
+    assert payload_omitted["success"] is True
+    assert _flag(engine.last["args"], "--source") == "wantedly"
+
+
+def test_settings_publishes_snapshot(tools, monkeypatch):
+    """A7: _settings publishes what it read via runtime.publish_settings; bare ctx never calls it."""
+    recorded: list[dict[str, Any]] = []
+
+    def recorder(settings_dict: dict[str, Any]) -> None:
+        recorded.append(dict(settings_dict))
+
+    monkeypatch.setattr(tools.runtime, "publish_settings", recorder)
+
+    # 1. With get_config, recorder sees the read settings
+    ctx = FakeContext({"max_results": 5})
+    tools._settings(ctx)
+    assert recorded == [{"max_results": 5}]
+
+    # 2. With no get_config on ctx, recorder is never called
+    class BareContextWithoutGetConfig:
+        state: dict[str, Any] = {}
+
+    tools._settings(BareContextWithoutGetConfig())
+    assert len(recorded) == 1, "publish_settings was called when ctx lacked get_config"
+

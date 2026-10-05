@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -774,3 +775,79 @@ def test_install_cron_cli_succeeds_on_reused_job(
     assert code == EXIT_OK
     assert "already installed and up to date; nothing created" in out
     assert "Run this manually" not in err
+
+
+# --------------------------------------------------------------------------- #
+# Regression suite: Group B (CLI profile choices, list max_results setting)
+# --------------------------------------------------------------------------- #
+
+
+def test_profile_rejects_unknown_choice_on_search_and_monitor(capsys: pytest.CaptureFixture[str]):
+    """B1: --profile on search and on monitor rejects an unknown profile through choices."""
+    parser = build_parser()
+
+    # Search rejects unknown profile with exit code 2 and "invalid choice"
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["search", "--profile", "bogus"])
+    assert excinfo.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
+
+    # Monitor rejects unknown profile with exit code 2 and "invalid choice"
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["monitor", "--profile", "bogus"])
+    assert excinfo.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
+
+    # Valid profiles from settings.PROFILE_NAMES still parse cleanly
+    for name in settings.PROFILE_NAMES:
+        assert parser.parse_args(["search", "--profile", name]).profile == name
+        assert parser.parse_args(["monitor", "--profile", name]).profile == name
+
+
+def test_list_limit_honours_max_results_setting(monkeypatch: pytest.MonkeyPatch):
+    """B2: JOBREACH_SETTING_MAX_RESULTS sets default list limit; explicit -n wins."""
+    clear_settings(monkeypatch)
+    # Default is 25 when unset
+    assert build_parser().parse_args(["list"]).limit == 25
+
+    # JOBREACH_SETTING_MAX_RESULTS=30 sets default limit to 30
+    setting(monkeypatch, "max_results", "30")
+    assert build_parser().parse_args(["list"]).limit == 30
+
+    # Explicit -n still wins over the setting
+    assert build_parser().parse_args(["list", "-n", "10"]).limit == 10
+
+    # Invalid setting falls back to 25
+    setting(monkeypatch, "max_results", "invalid")
+    assert build_parser().parse_args(["list"]).limit == 25
+    setting(monkeypatch, "max_results", "0")
+    assert build_parser().parse_args(["list"]).limit == 25
+    setting(monkeypatch, "max_results", "-5")
+    assert build_parser().parse_args(["list"]).limit == 25
+
+
+def test_list_command_passes_configured_max_results_to_query(
+    data_home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+):
+    """B2: When list runs without -n, query receives limit up to 30 from setting."""
+    setting(monkeypatch, "max_results", "30")
+    query_calls: list[dict[str, Any]] = []
+
+    class FakeListRepo:
+        def close(self) -> None:
+            pass
+
+        def count(self, **kwargs: Any) -> int:
+            return 0
+
+    def fake_query(repo: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        query_calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr("jobreach.cli.query", fake_query)
+    monkeypatch.setattr("jobreach.cli.open_db", lambda path: FakeListRepo())
+    code, _, _ = run(capsys, "list", "--json")
+    assert code == EXIT_OK
+    assert query_calls, "query was never called"
+    assert query_calls[-1]["limit"] == 30
+

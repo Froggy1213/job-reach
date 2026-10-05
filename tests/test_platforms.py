@@ -244,6 +244,10 @@ def test_generated_monitor_script_fails_gracefully_when_plugin_dir_missing(
             python=sys.executable,
             args=[],
             job_name="job-reach-monitor",
+            # Baked explicitly: the template has no defaults, and an omitted
+            # snapshot path would silently resolve against the ambient
+            # HERMES_HOME (the developer's real one) while rendering.
+            snapshot=str(tmp_path / "settings.json"),
         ),
         encoding="utf-8",
     )
@@ -286,6 +290,7 @@ def test_generated_monitor_script_prefers_installed_candidate_over_baked(
             python=sys.executable,
             args=[],
             job_name="job-reach-monitor",
+            snapshot=str(tmp_path / "settings.json"),
         ),
         encoding="utf-8",
     )
@@ -309,6 +314,7 @@ def test_generated_monitor_script_guards_vanished_interpreter(
             python="/nonexistent/bin/python",
             args=[],
             job_name="job-reach-monitor",
+            snapshot=str(tmp_path / "settings.json"),
         ),
         encoding="utf-8",
     )

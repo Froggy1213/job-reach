@@ -110,9 +110,8 @@ def build_parser() -> argparse.ArgumentParser:
     search_cmd.add_argument("--validate", choices=settings.VALIDATION_MODES, default=default_validate,
                             help="relevance filter: 'local' is free, 'llm' needs an API key "
                                  f"(default: {default_validate})")
-    search_cmd.add_argument("--profile", default=default_profile,
-                            help=f"filter profile: {', '.join(settings.PROFILE_NAMES)} "
-                                 f"(default: {default_profile})")
+    search_cmd.add_argument("--profile", choices=settings.PROFILE_NAMES, default=default_profile,
+                            help=f"filter profile (default: {default_profile})")
     search_cmd.add_argument("--llm-model", default=None,
                             help="model for --validate llm (default: implied by the API key found)")
     search_cmd.add_argument("--llm-base-url", default=None,
@@ -134,7 +133,9 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_cmd.add_argument("--db", default=None)
 
     list_cmd = sub.add_parser("list", help="read stored listings")
-    list_cmd.add_argument("-n", "--limit", type=int, default=25)
+    # The engine reads the mirrored setting here so the manual path agrees with the tool path.
+    list_cmd.add_argument("-n", "--limit", type=int,
+                          default=settings.get_setting_int("max_results", 25))
     list_cmd.add_argument("--offset", type=int, default=0)
     list_cmd.add_argument("-s", "--source", default=None)
     list_cmd.add_argument("-k", "--keyword", default=None,
@@ -168,7 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
     monitor_cmd.add_argument("-l", "--location", default=DEFAULT_LOCATION)
     monitor_cmd.add_argument("-s", "--source", default=default_source,
                              help=f"boards to watch (default: {default_source})")
-    monitor_cmd.add_argument("--profile", default=default_profile,
+    monitor_cmd.add_argument("--profile", choices=settings.PROFILE_NAMES, default=default_profile,
                              help=f"filter profile (default: {default_profile})")
     monitor_cmd.add_argument("--llm-model", default=None)
     monitor_cmd.add_argument("--llm-base-url", default=None)

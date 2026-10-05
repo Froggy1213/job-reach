@@ -203,6 +203,20 @@ def _recency(job: JobPosting) -> tuple[int, float]:
     return (1 if job.posted_at else 0, moment.timestamp())
 
 
+def _display_key(job: JobPosting) -> tuple[bool, int, float]:
+    """Sort key for display order: new-first, and newest-first within each group.
+
+    The ``job_search`` schema promises "Maximum listings returned (newest and
+    new-first)". Freshly seen listings (``is_new``) outrank recency so an agent
+    inspecting a run sees what changed since the last scrape before seeing older
+    matches. Within each group (new vs. seen), :func:`_recency` provides the
+    notion of "freshest": an explicit ``posted_at`` beats a synthesized date,
+    and higher timestamps sort first (negated for ascending order).
+    """
+    has_posted, moment = _recency(job)
+    return (not job.is_new, -has_posted, -moment)
+
+
 def collapse_duplicates(
     jobs: Sequence[JobPosting],
 ) -> list[tuple[JobPosting, list[str]]]:
@@ -344,7 +358,7 @@ def _finish(
         display = [job for job, _ in collapsed]
         collapsed_urls = {job.url: urls for job, urls in collapsed}
 
-    ordered = sorted(display, key=lambda j: (not j.is_new, j.platform, j.title.lower()))
+    ordered = sorted(display, key=_display_key)
     if request.new_only:
         ordered = [job for job in ordered if job.is_new]
     shown = ordered[: request.limit] if request.limit else ordered

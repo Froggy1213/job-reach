@@ -71,16 +71,17 @@ _SEARCH = {
                     "'japandev', 'mynavi2027', 'linkedin'. Omit to use the "
                     "plugin's configured default sources (the design feed "
                     "['wantedly','mynavi2027','linkedin'] when none is "
-                    "configured). For an English-language search add 'japandev' "
+                    "configured) — an empty list is rejected rather than read as "
+                    "'the defaults'. For an English-language search add 'japandev' "
                     "or 'daijob'; for the widest market add 'indeed'."
                 ),
             },
             "limit": {
                 "type": "integer",
                 "description": (
-                    "Maximum listings returned (newest and new-first). Omit to "
-                    "use the plugin's configured max_results, or for all when "
-                    "none is configured."
+                    "Maximum listings returned (newest and new-first), at least "
+                    "1. Omit to use the plugin's configured max_results, or for "
+                    "all when none is configured."
                 ),
             },
             "new_only": {
@@ -308,14 +309,16 @@ _STATUS = {
         "readiness — which browser backend is in use, which interpreter runs "
         "the engine, which boards can actually run, and whether the Obsidian "
         "vault was found. Call this first when a search fails or before "
-        "setting up monitoring."
+        "setting up monitoring. The answer always carries a `warnings` map: "
+        "when its store or runtime half is empty because that call failed, the "
+        "failure is named there instead of being hidden behind a null."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "recent_runs": {
                 "type": "integer",
-                "description": "How many past runs to include (default 5).",
+                "description": "How many past runs to include (default 5; zero is allowed).",
             }
         },
         "required": [],
@@ -331,7 +334,10 @@ _SETUP = {
         "is adopted as-is and no download happens. Only when Scrapling is absent "
         "does this create the plugin venv, install Playwright plus its Chromium "
         "build (~150 MB), and install the skill into Hermes' skills directory. "
-        "Takes minutes in the fallback case, seconds otherwise."
+        "Takes minutes in the fallback case, seconds otherwise. A failure here "
+        "is reported as a failure even when the skill itself was copied "
+        "(`skill_error` on the envelope names a skill-only failure, which does "
+        "not fail the runtime)."
     ),
     "parameters": {
         "type": "object",
