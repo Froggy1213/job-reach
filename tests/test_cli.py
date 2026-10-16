@@ -798,10 +798,35 @@ def test_profile_rejects_unknown_choice_on_search_and_monitor(capsys: pytest.Cap
     assert excinfo.value.code == 2
     assert "invalid choice" in capsys.readouterr().err
 
-    # Valid profiles from settings.PROFILE_NAMES still parse cleanly
+    # Valid profiles from settings.PROFILE_NAMES still parse cleanly (including --filter-profile alias)
     for name in settings.PROFILE_NAMES:
-        assert parser.parse_args(["search", "--profile", name]).profile == name
-        assert parser.parse_args(["monitor", "--profile", name]).profile == name
+        for flag in ("--profile", "--filter-profile"):
+            assert parser.parse_args(["search", flag, name]).profile == name
+            assert parser.parse_args(["monitor", flag, name]).profile == name
+
+
+def test_list_new_since_filters_at_sql_layer(
+    data_home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+):
+    """``list --new-since`` filters stored rows before paging and updates total."""
+    monkeypatch.setattr(
+        "sys.stdin",
+        FakeStdin(
+            json.dumps([{"title": "UI Designer", "company": "Acme", "url": "https://i.test/1"}])
+        ),
+    )
+    assert run(capsys, "ingest", "--json")[0] == EXIT_OK
+
+    code, out, _ = run(capsys, "list", "--new-since", "2099-01-01", "--json")
+    assert code == EXIT_OK
+    payload = json.loads(out)
+    assert payload["total"] == 0
+    assert payload["shown"] == 0
+    assert payload["jobs"] == []
+
+    code_invalid, _, err_invalid = run(capsys, "list", "--new-since", "not-a-date", "--json")
+    assert code_invalid == EXIT_USAGE
+    assert "--new-since" in err_invalid
 
 
 def test_list_limit_honours_max_results_setting(monkeypatch: pytest.MonkeyPatch):
@@ -850,4 +875,5 @@ def test_list_command_passes_configured_max_results_to_query(
     assert code == EXIT_OK
     assert query_calls, "query was never called"
     assert query_calls[-1]["limit"] == 30
+
 

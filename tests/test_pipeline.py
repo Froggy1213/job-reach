@@ -535,3 +535,39 @@ def test_pipeline_order_new_first_then_recency(repo: SQLiteJobRepository):
     assert urls.index("https://i.test/new-mid") < urls.index("https://i.test/known-1")
 
 
+def test_pipeline_order_title_match_precedes_body_only_match_for_keyword(
+    repo: SQLiteJobRepository,
+):
+    """Listings whose title matches the search keyword outrank body-only matches."""
+    newest = datetime(2026, 9, 1, tzinfo=UTC)
+    result = finish(
+        [
+            posting(
+                "https://w.test/backend",
+                title="Backend Engineer",
+                company="Acme",
+                posted_at=newest,
+            ),
+            posting(
+                "https://j.test/frontend-nodate",
+                title="Senior Frontend Engineer",
+                company="Beta",
+                posted_at=None,
+            ),
+            posting(
+                "https://w.test/frontend-dated",
+                title="Frontend Engineer",
+                company="Gamma",
+                posted_at=OLDER,
+            ),
+        ],
+        repo,
+        keyword="frontend engineer",
+    )
+    assert [job["url"] for job in result["jobs"]] == [
+        "https://w.test/frontend-dated",
+        "https://j.test/frontend-nodate",
+        "https://w.test/backend",
+    ]
+
+

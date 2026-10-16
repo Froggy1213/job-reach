@@ -271,6 +271,19 @@ def _csv(value: Any) -> str:
     return _str_arg({"value": value}, "value") or ""
 
 
+def _parse_cutoff(threshold: str) -> datetime | None:
+    """Parse *threshold* as a UTC :class:`datetime`, or ``None`` if not ISO-8601."""
+    try:
+        cutoff: datetime | None = datetime.fromisoformat(threshold)
+    except ValueError:
+        return None
+    if cutoff.tzinfo is None:
+        # A bare date ("2026-10-03") means the start of that day, in UTC —
+        # the same clock the engine stamps every row with.
+        cutoff = cutoff.replace(tzinfo=UTC)
+    return cutoff
+
+
 def _new_since_predicate(threshold: str) -> Callable[[Mapping[str, Any]], bool]:
     """Build the predicate behind ``job_list``'s ``new_since`` argument.
 
@@ -284,14 +297,7 @@ def _new_since_predicate(threshold: str) -> Callable[[Mapping[str, Any]], bool]:
     A value that is not a timestamp at all falls back to the old text compare,
     so a caller passing something else keeps the behaviour it had.
     """
-    try:
-        cutoff: datetime | None = datetime.fromisoformat(threshold)
-    except ValueError:
-        cutoff = None
-    if cutoff is not None and cutoff.tzinfo is None:
-        # A bare date ("2026-10-03") means the start of that day, in UTC —
-        # the same clock the engine stamps every row with.
-        cutoff = cutoff.replace(tzinfo=UTC)
+    cutoff = _parse_cutoff(threshold)
 
     def keep(job: Mapping[str, Any]) -> bool:
         raw = str(job.get("scraped_at") or "")
@@ -875,6 +881,9 @@ async def handle_job_list(params: dict[str, Any], *, ctx: Any = None, **kwargs: 
     if limit is None:
         limit = settings.get("max_results")
 
+    raw_new_since = _str_arg(params, "new_since")
+    cutoff = _parse_cutoff(raw_new_since) if raw_new_since else None
+
     args = ["list", "--json"]
     options = _drop_none(
         {
@@ -882,6 +891,7 @@ async def handle_job_list(params: dict[str, Any], *, ctx: Any = None, **kwargs: 
             "--offset": _int_arg(params, "offset"),
             "-k": _str_arg(params, "text"),
             "-s": _str_arg(params, "source"),
+            "--new-since": cutoff.isoformat() if cutoff is not None else None,
         }
     )
     for flag, value in options.items():
@@ -896,16 +906,19 @@ async def handle_job_list(params: dict[str, Any], *, ctx: Any = None, **kwargs: 
     if error:
         return _fail(**error)
     if params.get("new_since"):
-        # Filtering in the handler keeps the CLI surface small; the store
-        # already returns newest-first, and the comparison is on instants
-        # rather than on ISO text (see _new_since_predicate).
+        # The engine filters on `first_seen_at >= --new-since` before paging and
+        # collapsing when `cutoff` is a valid timestamp; keeping the predicate
+        # here as a backstop also covers non-timestamp strings and stubbed
+        # engine payloads, and restates `shown`/`unique`/`hidden_duplicates`.
         keep = _new_since_predicate(str(params["new_since"]))
         payload["jobs"] = [job for job in payload.get("jobs", []) if keep(job)]
         payload["shown"] = len(payload["jobs"])
-        # The collapse happened inside the engine and cannot see this filter,
-        # so `unique` has to come down with `shown` or the envelope counts rows
-        # it is no longer returning.
         payload["unique"] = payload["shown"]
+        payload["hidden_duplicates"] = sum(
+            int(job.get("duplicates") or 0)
+            for job in payload["jobs"]
+            if isinstance(job, Mapping)
+        )
     return _ok({"result": payload})
 
 

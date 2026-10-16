@@ -24,6 +24,7 @@ import asyncio
 import json
 import sys
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -110,8 +111,13 @@ def build_parser() -> argparse.ArgumentParser:
     search_cmd.add_argument("--validate", choices=settings.VALIDATION_MODES, default=default_validate,
                             help="relevance filter: 'local' is free, 'llm' needs an API key "
                                  f"(default: {default_validate})")
-    search_cmd.add_argument("--profile", choices=settings.PROFILE_NAMES, default=default_profile,
-                            help=f"filter profile (default: {default_profile})")
+    search_cmd.add_argument(
+        "--profile", "--filter-profile",
+        dest="profile",
+        choices=settings.PROFILE_NAMES,
+        default=default_profile,
+        help=f"filter profile (default: {default_profile}; use --filter-profile via `hermes job-reach`)",
+    )
     search_cmd.add_argument("--llm-model", default=None,
                             help="model for --validate llm (default: implied by the API key found)")
     search_cmd.add_argument("--llm-base-url", default=None,
@@ -140,6 +146,8 @@ def build_parser() -> argparse.ArgumentParser:
     list_cmd.add_argument("-s", "--source", default=None)
     list_cmd.add_argument("-k", "--keyword", default=None,
                           help="substring match on title/company/location")
+    list_cmd.add_argument("--new-since", default=None,
+                          help="ISO-8601 timestamp or YYYY-MM-DD; keep listings first seen since then")
     list_cmd.add_argument("--detail", action="store_true",
                           help="include each listing's stored description "
                                "(costs context: up to 10,000 chars per listing)")
@@ -169,8 +177,13 @@ def build_parser() -> argparse.ArgumentParser:
     monitor_cmd.add_argument("-l", "--location", default=DEFAULT_LOCATION)
     monitor_cmd.add_argument("-s", "--source", default=default_source,
                              help=f"boards to watch (default: {default_source})")
-    monitor_cmd.add_argument("--profile", choices=settings.PROFILE_NAMES, default=default_profile,
-                             help=f"filter profile (default: {default_profile})")
+    monitor_cmd.add_argument(
+        "--profile", "--filter-profile",
+        dest="profile",
+        choices=settings.PROFILE_NAMES,
+        default=default_profile,
+        help=f"filter profile (default: {default_profile}; use --filter-profile via `hermes job-reach`)",
+    )
     monitor_cmd.add_argument("--llm-model", default=None)
     monitor_cmd.add_argument("--llm-base-url", default=None)
     monitor_cmd.add_argument("--validate", choices=settings.VALIDATION_MODES,
@@ -334,7 +347,23 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     return EXIT_FAILURE if _total_failure(result) else EXIT_OK
 
 
+def _parse_new_since(raw: str | None) -> datetime | None:
+    """Parse ``--new-since`` as a UTC :class:`datetime`, or raise ``ValueError``."""
+    if raw is None or not raw.strip():
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.strip())
+    except ValueError as exc:
+        raise ValueError(
+            f"invalid --new-since timestamp {raw!r} (expected ISO-8601 or YYYY-MM-DD)"
+        ) from exc
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt
+
+
 def _cmd_list(args: argparse.Namespace) -> int:
+    new_since = _parse_new_since(getattr(args, "new_since", None))
     repository = open_db(args.db)
     try:
         jobs = query(
@@ -343,11 +372,13 @@ def _cmd_list(args: argparse.Namespace) -> int:
             source=args.source,
             limit=args.limit,
             offset=args.offset,
+            new_since=new_since,
             detail=args.detail,
             dedupe=not args.no_dedupe,
         )
         total = repository.count(
-            source=resolve_platform(args.source) if args.source else None
+            source=resolve_platform(args.source) if args.source else None,
+            new_since=new_since,
         )
     finally:
         repository.close()
