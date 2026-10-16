@@ -93,6 +93,21 @@ def test_salary_is_not_overwritten_by_null(db_path: Path):
         assert repo.query(limit=1)[0].salary == "600万"
 
 
+def test_description_and_posted_at_are_backfilled_and_not_overwritten_by_null(db_path: Path):
+    posted = datetime(2026, 6, 1, tzinfo=UTC)
+    with SQLiteJobRepository(db_path) as repo:
+        repo.save_many([job("https://x.test/1")])
+        repo.save_many([job("https://x.test/1", description="Full body", posted_at=posted)])
+        stored = repo.query(limit=1)[0]
+        assert stored.description == "Full body"
+        assert stored.posted_at == posted
+
+        repo.save_many([job("https://x.test/1")])
+        stored_after = repo.query(limit=1)[0]
+        assert stored_after.description == "Full body"
+        assert stored_after.posted_at == posted
+
+
 # --- queries ---------------------------------------------------------------
 
 

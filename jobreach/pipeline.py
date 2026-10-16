@@ -27,6 +27,7 @@ one board. Neither changes what is stored — only what is reported.
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -203,18 +204,41 @@ def _recency(job: JobPosting) -> tuple[int, float]:
     return (1 if job.posted_at else 0, moment.timestamp())
 
 
-def _display_key(job: JobPosting) -> tuple[bool, int, float]:
-    """Sort key for display order: new-first, and newest-first within each group.
+def _title_relevance(job: JobPosting, keyword: str | None) -> int:
+    """Return ``1`` when *job.title* contains every token of *keyword*, else ``0``.
+
+    Server-side search on Wantedly, Green and Daijob matches body text as well
+    as titles, so a query for ``"frontend engineer"`` also returns Backend or
+    Data roles whose company description mentions frontend work. Meanwhile
+    boards without ``posted_at`` (Japan Dev, LinkedIn, Mynavi) sort behind any
+    dated card on recency alone. Ranking full title matches ahead of body-only
+    matches within each ``is_new`` bucket keeps genuine title hits from being
+    pushed past ``limit`` by freshly dated off-target cards.
+    """
+    if not keyword or not keyword.strip() or job.title_is_synthetic:
+        return 0
+    needle = keyword.strip().lower()
+    title = job.title.lower()
+    if needle in title:
+        return 1
+    tokens = [tok for tok in re.split(r"\W+", needle) if tok]
+    return 1 if tokens and all(tok in title for tok in tokens) else 0
+
+
+def _display_key(
+    job: JobPosting, *, keyword: str | None = None
+) -> tuple[bool, int, int, float]:
+    """Sort key for display order: new-first, title-match, then newest-first.
 
     The ``job_search`` schema promises "Maximum listings returned (newest and
     new-first)". Freshly seen listings (``is_new``) outrank recency so an agent
     inspecting a run sees what changed since the last scrape before seeing older
-    matches. Within each group (new vs. seen), :func:`_recency` provides the
-    notion of "freshest": an explicit ``posted_at`` beats a synthesized date,
-    and higher timestamps sort first (negated for ascending order).
+    matches. When a search *keyword* is present, listings whose title directly
+    matches the query sort ahead of fuzzy body-only matches before :func:`_recency`
+    breaks ties by explicit ``posted_at`` and timestamp.
     """
     has_posted, moment = _recency(job)
-    return (not job.is_new, -has_posted, -moment)
+    return (not job.is_new, -_title_relevance(job, keyword), -has_posted, -moment)
 
 
 def collapse_duplicates(
@@ -358,7 +382,7 @@ def _finish(
         display = [job for job, _ in collapsed]
         collapsed_urls = {job.url: urls for job, urls in collapsed}
 
-    ordered = sorted(display, key=_display_key)
+    ordered = sorted(display, key=lambda job: _display_key(job, keyword=request.keyword))
     if request.new_only:
         ordered = [job for job in ordered if job.is_new]
     shown = ordered[: request.limit] if request.limit else ordered

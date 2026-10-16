@@ -892,22 +892,24 @@ def test_new_since_falls_back_to_text_for_a_non_timestamp(tools):
 
 def test_job_list_filters_on_instants_and_restates_its_counts(tools, engine):
     engine.payload = {
-        "total": 2,
+        "total": 4,
         "shown": 2,
         "unique": 2,
-        "hidden_duplicates": 0,
+        "hidden_duplicates": 2,
         "jobs": [
-            {"url": "https://x.test/old", "scraped_at": "2026-10-02T23:59:59+00:00"},
-            {"url": "https://x.test/new", "scraped_at": "2026-10-03T00:00:00.500000+00:00"},
+            {"url": "https://x.test/old", "scraped_at": "2026-10-02T23:59:59+00:00", "duplicates": 1},
+            {"url": "https://x.test/new", "scraped_at": "2026-10-03T00:00:00.500000+00:00", "duplicates": 1},
         ],
     }
 
     payload = call(tools.handle_job_list, {"new_since": "2026-10-03T00:00:00Z"})
 
+    assert _flag(engine.last["args"], "--new-since") == "2026-10-03T00:00:00+00:00"
     jobs = payload["result"]["jobs"]
     assert [job["url"] for job in jobs] == ["https://x.test/new"]
     assert payload["result"]["shown"] == 1
     assert payload["result"]["unique"] == 1
+    assert payload["result"]["hidden_duplicates"] == 1
 
 
 # --------------------------------------------------------------------------- #

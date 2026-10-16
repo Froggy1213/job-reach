@@ -186,11 +186,18 @@ def test_manifest_provides_tools_matches_registration(
 
 
 def test_only_plugin_context_methods_that_hermes_defines_are_used(plugin):
-    """A typo in the ctx surface fails silently at runtime, so check the source."""
-    hermes_plugins = Path.home() / ".hermes" / "hermes-agent" / "hermes_cli" / "plugins.py"
-    if not hermes_plugins.exists():
+    """A typo in the ctx surface fails silently at runtime, so check the source.
+
+    ``PluginContext`` pulls some registrars into its class body from sibling
+    modules — ``register_skill`` is defined in ``plugins_content.py`` — so the
+    whole ``hermes_cli`` package is the contract, not ``plugins.py`` alone.
+    """
+    hermes_cli = Path.home() / ".hermes" / "hermes-agent" / "hermes_cli"
+    if not (hermes_cli / "plugins.py").exists():
         pytest.skip("Hermes source checkout not available")
-    source = hermes_plugins.read_text(encoding="utf-8")
+    source = "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted(hermes_cli.glob("*.py"))
+    )
     used = re.findall(r"ctx\.(register_\w+)", (PROJECT_ROOT / "__init__.py").read_text("utf-8"))
     assert used, "expected the plugin to register something"
     for method in set(used):

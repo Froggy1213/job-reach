@@ -150,8 +150,13 @@ class JobRepository(ABC):
         """Return stored postings, newest first, optionally filtered."""
 
     @abstractmethod
-    def count(self, *, source: SourcePlatform | None = None) -> int:
-        """Total number of stored postings (optionally for one board)."""
+    def count(
+        self,
+        *,
+        source: SourcePlatform | None = None,
+        new_since: datetime | None = None,
+    ) -> int:
+        """Total number of stored postings (optionally for one board / time window)."""
 
     @abstractmethod
     def stats(self) -> dict[str, Any]:
@@ -258,15 +263,25 @@ class SQLiteJobRepository(JobRepository):
             raise StoreError(f"query failed: {exc}") from exc
         return [_row_to_job(row) for row in rows]
 
-    def count(self, *, source: SourcePlatform | None = None) -> int:
+    def count(
+        self,
+        *,
+        source: SourcePlatform | None = None,
+        new_since: datetime | None = None,
+    ) -> int:
+        where: list[str] = []
+        params: list[Any] = []
+        if source is not None:
+            where.append("source_platform = ?")
+            params.append(str(source))
+        if new_since is not None:
+            where.append("first_seen_at >= ?")
+            params.append(_iso(new_since))
+        sql = "SELECT COUNT(*) AS n FROM jobs"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
         try:
-            if source is None:
-                row = self._conn.execute("SELECT COUNT(*) AS n FROM jobs").fetchone()
-            else:
-                row = self._conn.execute(
-                    "SELECT COUNT(*) AS n FROM jobs WHERE source_platform = ?",
-                    (str(source),),
-                ).fetchone()
+            row = self._conn.execute(sql, params).fetchone()
         except sqlite3.Error as exc:
             raise StoreError(f"count failed: {exc}") from exc
         return int(row["n"])
@@ -325,7 +340,9 @@ class SQLiteJobRepository(JobRepository):
                             title        = excluded.title,
                             company      = excluded.company,
                             location     = excluded.location,
-                            salary       = COALESCE(excluded.salary, jobs.salary)
+                            salary       = COALESCE(excluded.salary, jobs.salary),
+                            description  = COALESCE(excluded.description, jobs.description),
+                            posted_at    = COALESCE(excluded.posted_at, jobs.posted_at)
                         RETURNING times_seen
                         """,
                         (
